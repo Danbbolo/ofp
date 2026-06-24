@@ -477,3 +477,83 @@ class TestLiquidations:
         ])
         feats = _extract(_trades_df([]), liq=liq)
         assert feats["long_liq_vol"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Multi-Zoom tests
+# ---------------------------------------------------------------------------
+
+class TestMultiZoom:
+    """extract_multi_zoom_features — 3 zoom levels, 90 keys."""
+
+    def test_produces_90_keys(self) -> None:
+        from ofp.feature_extractor import extract_multi_zoom_features
+        trades = _trades_df([
+            (10_000, 68500.0, 1.0, False),
+            (20_000, 68510.0, 0.5, True),
+            (80_000, 68490.0, 2.0, False),
+        ])
+        book_snaps = {0: ([(68000.0, 1.0)], [(68100.0, 2.0)]),
+                      50000: ([(68000.0, 1.0)], [(68100.0, 2.0)])}
+        feats = extract_multi_zoom_features(
+            trades_df=trades,
+            book_snapshots=book_snaps,
+            liq_df=_empty_liq_df(),
+            micro_window_ms=60_000,
+            meso_window_ms=120_000,
+            macro_window_ms=300_000,
+            end_time_ms=100_000,
+            rolling_stats={"rolling_avg_volume": 1000.0},
+        )
+        assert len(feats) == 90
+        assert "micro_buy_volume" in feats
+        assert "meso_buy_volume" in feats
+        assert "macro_buy_volume" in feats
+
+    def test_empty_macro_returns_zero(self) -> None:
+        """With NO trades at all, all zoom levels return 0 for trade features."""
+        from ofp.feature_extractor import extract_multi_zoom_features
+        trades = _trades_df([])  # empty
+        book_snaps = {0: ([(68000.0, 1.0)], [(68100.0, 2.0)])}
+        feats = extract_multi_zoom_features(
+            trades_df=trades,
+            book_snapshots=book_snaps,
+            liq_df=_empty_liq_df(),
+            micro_window_ms=20_000,
+            meso_window_ms=60_000,
+            macro_window_ms=300_000,
+            end_time_ms=100_000,
+            rolling_stats={"rolling_avg_volume": 1000.0},
+        )
+        # All trade volumes zero since no trades exist
+        assert feats["micro_buy_volume"] == 0.0
+        assert feats["meso_buy_volume"] == 0.0
+        assert feats["macro_buy_volume"] == 0.0
+        assert feats["macro_sell_volume"] == 0.0
+        assert feats["macro_net_volume"] == 0.0
+
+    def test_zooms_see_different_trade_counts(self) -> None:
+        """Macro sees more trades than meso, meso more than micro."""
+        from ofp.feature_extractor import extract_multi_zoom_features
+        # Trade at 10K → macro only (not meso, not micro)
+        # Trade at 50K → meso + macro (not micro)
+        # Trade at 85K → all three
+        trades = _trades_df([
+            (10_000, 68500.0, 1.0, False),
+            (50_000, 68510.0, 2.0, False),
+            (85_000, 68490.0, 3.0, False),
+        ])
+        book_snaps = {0: ([(68000.0, 1.0)], [(68100.0, 2.0)])}
+        feats = extract_multi_zoom_features(
+            trades_df=trades,
+            book_snapshots=book_snaps,
+            liq_df=_empty_liq_df(),
+            micro_window_ms=20_000,   # [80K, 100K] → sees trade at 85K only → 3.0
+            meso_window_ms=60_000,    # [40K, 100K] → sees trades at 50K, 85K → 5.0
+            macro_window_ms=300_000,  # [-200K, 100K] → sees all three → 6.0
+            end_time_ms=100_000,
+            rolling_stats={"rolling_avg_volume": 1000.0},
+        )
+        assert feats["micro_buy_volume"] == 3.0
+        assert feats["meso_buy_volume"] == 5.0
+        assert feats["macro_buy_volume"] == 6.0

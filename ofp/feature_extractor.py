@@ -262,8 +262,74 @@ def extract_features(
 
 
 # ---------------------------------------------------------------------------
-# Book depth helpers
+# Multi-Zoom feature extraction
 # ---------------------------------------------------------------------------
+
+def extract_multi_zoom_features(
+    trades_df: pd.DataFrame,
+    book_snapshots: dict[int, tuple[list[tuple[float, float]], list[tuple[float, float]]]],
+    liq_df: pd.DataFrame,
+    micro_window_ms: int,
+    meso_window_ms: int,
+    macro_window_ms: int,
+    end_time_ms: int,
+    rolling_stats: dict[str, float],
+) -> dict[str, float]:
+    """
+    Extract features at 3 zoom levels sharing the same *end_time_ms*.
+
+    Returns a dict with keys prefixed ``micro_``, ``meso_``, ``macro_``
+    (30 features × 3 = 90 keys total).
+    """
+    # Book lookup helper
+    snap_ts = np.array(sorted(book_snapshots.keys()), dtype=np.int64)
+
+    def _book_at(ms: int) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+        if len(snap_ts) == 0:
+            return ([], [])
+        idx = int(np.searchsorted(snap_ts, ms, side="right")) - 1
+        if idx < 0:
+            return ([], [])
+        return book_snapshots[int(snap_ts[idx])]
+
+    result: dict[str, float] = {}
+
+    # Pre-index timestamps for fast slicing
+    trade_ts = trades_df["timestamp_ms"].values
+    liq_ts = liq_df["timestamp_ms"].values if len(liq_df) > 0 else None
+
+    for prefix, window_ms in [("micro", micro_window_ms), ("meso", meso_window_ms), ("macro", macro_window_ms)]:
+        win_start = end_time_ms - window_ms
+
+        # Slice trades and liquidations to [win_start, end_time_ms)
+        t_start = int(np.searchsorted(trade_ts, win_start, side="left"))
+        t_end = int(np.searchsorted(trade_ts, end_time_ms, side="left"))
+        sliced_trades = trades_df.iloc[t_start:t_end]
+
+        if liq_ts is not None and len(liq_df) > 0:
+            l_start = int(np.searchsorted(liq_ts, win_start, side="left"))
+            l_end = int(np.searchsorted(liq_ts, end_time_ms, side="left"))
+            sliced_liq = liq_df.iloc[l_start:l_end]
+        else:
+            sliced_liq = liq_df
+
+        feats = extract_features(
+            trades_df=sliced_trades,
+            book_snapshot_start=_book_at(win_start),
+            book_snapshot_end=_book_at(end_time_ms),
+            liq_df=sliced_liq,
+            window_start_ms=win_start,
+            window_end_ms=end_time_ms,
+            rolling_avg_volume=rolling_stats.get("rolling_avg_volume", 0.0),
+            current_price=rolling_stats.get("current_price", 0.0),
+            _24h_avg_range=rolling_stats.get("_24h_avg_range", 0.0),
+            _24h_low=rolling_stats.get("_24h_low", 0.0),
+            _24h_high=rolling_stats.get("_24h_high", 0.0),
+        )
+        for k, v in feats.items():
+            result[f"{prefix}_{k}"] = v
+
+    return result
 
 def _top_sizes(
     levels: list[tuple[float, float]], n: int

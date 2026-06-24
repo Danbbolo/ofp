@@ -14,7 +14,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from ofp.feature_extractor import extract_features
+from ofp.feature_extractor import extract_multi_zoom_features
 
 
 class GridSweeper:
@@ -46,10 +46,8 @@ class GridSweeper:
         _24h_stats: dict[str, float] | None = None,
     ) -> Iterator[dict[str, Any]]:
         """
-        Yield one feature+label dict per (window, horizon, step).
-
-        All DataFrames must be pre-sorted and pre-typed (no string columns).
-        *book_snapshots* is a dict keyed by **millisecond** timestamp.
+        Multi-zoom sweep: micro windows slide, meso (300s) + macro (1800s) fixed.
+        Horizons: [300, 900, 1800].
         """
         if _24h_stats is None:
             _24h_stats = {}
@@ -57,18 +55,9 @@ class GridSweeper:
         trades = trades_df
         liq = liq_df
 
-        # Book lookup
-        snap_ts = np.array(sorted(book_snapshots.keys()), dtype=np.int64)
+        MESO_MS = 300_000
+        MACRO_MS = 1_800_000
 
-        def _book_at(target_ms: int) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
-            if len(snap_ts) == 0:
-                return ([], [])
-            idx = int(np.searchsorted(snap_ts, target_ms, side="right")) - 1
-            if idx < 0:
-                return ([], [])
-            return book_snapshots[int(snap_ts[idx])]
-
-        # Price lookup & slicing
         trade_ts = trades["timestamp_ms"].values
         trade_px = trades["price"].values
 
@@ -78,35 +67,24 @@ class GridSweeper:
                 return None
             return float(trade_px[idx])
 
-        def _slice_trades(lo_ms: int, hi_ms: int) -> pd.DataFrame:
-            lo = int(np.searchsorted(trade_ts, lo_ms, side="left"))
-            hi = int(np.searchsorted(trade_ts, hi_ms, side="left"))
-            return trades.iloc[lo:hi]
-
-        liq_ts = liq["timestamp_ms"].values
-
-        def _slice_liq(lo_ms: int, hi_ms: int) -> pd.DataFrame:
-            lo = int(np.searchsorted(liq_ts, lo_ms, side="left"))
-            hi = int(np.searchsorted(liq_ts, hi_ms, side="left"))
-            return liq.iloc[lo:hi]
-
-        # Sweep
         data_start_ms = int(trade_ts[0])
         data_end_ms = int(trade_ts[-1])
 
-        # ------------------------------------------------------------------
-        # Sweep
-        # ------------------------------------------------------------------
+        rolling_stats = {
+            "rolling_avg_volume": rolling_avg_volume,
+            **_24h_stats,
+        }
+
         for window_sec in self._window_sizes_sec:
-            window_ms = window_sec * 1000
-            step_ms = window_ms // 2  # 50 % overlap
+            micro_ms = window_sec * 1000
+            step_ms = micro_ms // 2
 
             for horizon_sec in self._horizons_sec:
                 horizon_ms = horizon_sec * 1000
                 win_start = data_start_ms
 
-                while win_start + window_ms + horizon_ms <= data_end_ms:
-                    win_end = win_start + window_ms
+                while win_start + micro_ms + horizon_ms <= data_end_ms:
+                    win_end = win_start + micro_ms
                     future_ms = win_end + horizon_ms
 
                     current_px = _price_at(win_end)
@@ -116,30 +94,28 @@ class GridSweeper:
                         win_start += step_ms
                         continue
 
-                    feats = extract_features(
-                        trades_df=_slice_trades(win_start, win_end),
-                        book_snapshot_start=_book_at(win_start),
-                        book_snapshot_end=_book_at(win_end),
-                        liq_df=_slice_liq(win_start, win_end),
-                        window_start_ms=win_start,
-                        window_end_ms=win_end,
-                        rolling_avg_volume=rolling_avg_volume,
-                        current_price=current_px,
-                        **{k: _24h_stats.get(k, 0.0) for k in (
-                            "_24h_avg_range", "_24h_low", "_24h_high",
-                        )},
+                    rolling_stats["current_price"] = current_px
+
+                    feats = extract_multi_zoom_features(
+                        trades_df=trades,
+                        book_snapshots=book_snapshots,
+                        liq_df=liq,
+                        micro_window_ms=micro_ms,
+                        meso_window_ms=MESO_MS,
+                        macro_window_ms=MACRO_MS,
+                        end_time_ms=win_end,
+                        rolling_stats=rolling_stats,
                     )
 
-                    # Labels
                     outcome_pct = (future_px - current_px) / current_px
                     outcome_binary = 1 if outcome_pct > 0 else 0
 
                     yield {
                         **feats,
-                        "outcome_pct":   outcome_pct,
+                        "outcome_pct": outcome_pct,
                         "outcome_binary": outcome_binary,
-                        "window_size":   window_sec,
-                        "horizon":       horizon_sec,
+                        "window_size": window_sec,
+                        "horizon": horizon_sec,
                         "window_end_ms": win_end,
                     }
 
