@@ -12,6 +12,7 @@ Validates each download; retries once on validation failure.
 from __future__ import annotations
 
 import sys
+import gc
 from datetime import datetime, timedelta
 from pathlib import Path
 
