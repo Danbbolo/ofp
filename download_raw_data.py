@@ -132,6 +132,7 @@ def download_day(date_str: str) -> bool:
             else:
                 df_t.to_parquet(day_dir / "trades.parquet", index=False)
                 print(f"OK ({len(df_t):,} rows)", end="  ")
+        del df_t; gc.collect()  # free before book download
 
         if not ok and attempt < MAX_RETRIES:
             print("  RETRYING …")
@@ -158,6 +159,7 @@ def download_day(date_str: str) -> bool:
             return False
         df_b.to_parquet(day_dir / "book.parquet", index=False)
         print(f"OK ({len(df_b):,} rows)", end="  ")
+        del df_b; gc.collect()
 
         # --- Liquidations ---
         print(f"Liq …", end=" ", flush=True)
