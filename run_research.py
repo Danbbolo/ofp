@@ -112,42 +112,39 @@ def main(date_str: str) -> None:
     print(f"  Windows: {WINDOW_SIZES_SEC}")
     print(f"  Horizons: {HORIZONS_SEC}")
 
-    client = chd.CryptoHFTDataClient(api_key=API_KEY)
-
-    # --- Fetch ---
+    # --- Fetch sequentially (not parallel) to keep memory low ---
     print("  Downloading trades …", flush=True)
-    trades_raw = client.get_trades(symbol=SYMBOL, exchange=EXCHANGE,
-                                   start_date=date_str, end_date=date_str)
-
-    print("  Downloading orderbook …", flush=True)
-    book_raw = client.get_orderbook(symbol=SYMBOL, exchange=EXCHANGE,
-                                    start_date=date_str, end_date=date_str)
-
-    print("  Downloading liquidations …", flush=True)
-    liq_raw = client.get_liquidations(symbol=SYMBOL, exchange=EXCHANGE,
-                                      start_date=date_str, end_date=date_str)
-
-    print(f"  Trades:       {len(trades_raw):,} rows")
-    print(f"  Book deltas:  {len(book_raw):,} rows")
-    print(f"  Liquidations: {len(liq_raw):,} rows")
-
+    with chd.CryptoHFTDataClient(api_key=API_KEY, max_workers=1) as client:
+        trades_raw = client.get_trades(symbol=SYMBOL, exchange=EXCHANGE,
+                                       start_date=date_str, end_date=date_str)
+    print(f"  Trades: {len(trades_raw):,} rows")
     if trades_raw.empty:
         print("ERROR: No trade data fetched.")
         sys.exit(1)
 
-    # --- ONE conversion pass ---
-    print("  Converting types …", flush=True)
+    # Convert + free raw immediately
     trades_df = _prepare_trades(trades_raw)
-    liq_df = _prepare_liq(liq_raw)
-    del trades_raw  # free memory
-
-    # Sort (needed for binary search)
+    del trades_raw
     trades_df = trades_df.sort_values("timestamp_ms").reset_index(drop=True)
-    liq_df = liq_df.sort_values("timestamp_ms").reset_index(drop=True)
 
-    # --- Pre-build book snapshots ---
+    print("  Downloading orderbook …", flush=True)
+    with chd.CryptoHFTDataClient(api_key=API_KEY, max_workers=1) as client:
+        book_raw = client.get_orderbook(symbol=SYMBOL, exchange=EXCHANGE,
+                                        start_date=date_str, end_date=date_str)
+    print(f"  Book deltas: {len(book_raw):,} rows")
+
+    # Build snapshots, then free raw
     book_snapshots = _build_book_snapshots(book_raw)
-    del book_raw  # free 28M rows
+    del book_raw
+
+    print("  Downloading liquidations …", flush=True)
+    with chd.CryptoHFTDataClient(api_key=API_KEY, max_workers=1) as client:
+        liq_raw = client.get_liquidations(symbol=SYMBOL, exchange=EXCHANGE,
+                                          start_date=date_str, end_date=date_str)
+    print(f"  Liquidations: {len(liq_raw):,} rows")
+    liq_df = _prepare_liq(liq_raw)
+    del liq_raw
+    liq_df = liq_df.sort_values("timestamp_ms").reset_index(drop=True)
 
     # --- Compute globals ---
     rolling_avg_volume = float(trades_df["size"].sum() / max(len(trades_df), 1))
