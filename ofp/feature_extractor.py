@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 
@@ -135,34 +136,76 @@ def extract_features(
         delta_1 = delta_2 = delta_3 = delta_4 = delta_5 = 0.0
 
     # ------------------------------------------------------------------
-    # Group B — The Defence (Book Depth)     [keys 13–18]  RESERVED
+    # Group B — The Defence (Book Depth)     [keys 13–20]
     # ------------------------------------------------------------------
-    b_bid_imbalance = 0.0
-    b_ask_imbalance = 0.0
-    b_spread = 0.0
-    b_bid_depth_change = 0.0
-    b_ask_depth_change = 0.0
-    b_wall_pressure = 0.0
+    bids_end, asks_end = book_snapshot_end
+    bids_start, asks_start = book_snapshot_start
+
+    # 13.  bid_ask_imbalance  (top-5 total bid / top-5 total ask, end snapshot)
+    bid_ask_imbalance = _bid_ask_imbalance(bids_end, asks_end, n=5)
+
+    # 14.  bid_wall  (largest single bid size in top 5)
+    bid_wall = _max_size(bids_end, n=5)
+
+    # 15.  ask_wall  (largest single ask size in top 5)
+    ask_wall = _max_size(asks_end, n=5)
+
+    # 16.  wall_asymmetry
+    wall_asymmetry = bid_wall / (ask_wall + 1e-9)
+
+    # 17.  depth_trend  (start imbalance − end imbalance)
+    depth_trend = _bid_ask_imbalance(bids_start, asks_start, n=5) - bid_ask_imbalance
+
+    # 18.  spread_bps  (end snapshot)
+    spread_bps = _spread_bps(bids_end, asks_end)
+
+    # 19.  spread_change  (end − start)
+    spread_change = spread_bps - _spread_bps(bids_start, asks_start)
+
+    # 20.  book_depth_slope  (linear slope of cumulative combined depth, top 5)
+    book_depth_slope = _depth_slope(bids_end, asks_end, n=5)
 
     # ------------------------------------------------------------------
-    # Group C — The Wreckage (Liquidations)  [keys 19–23]  RESERVED
+    # Group C — The Forced Errors (Liquidations)  [keys 21–25]
     # ------------------------------------------------------------------
-    c_liq_net = 0.0
-    c_long_liq_volume = 0.0
-    c_short_liq_volume = 0.0
-    c_liq_intensity = 0.0
-    c_liq_price_deviation = 0.0
+    liq_mask = (liq_df["timestamp_ms"] >= window_start_ms) & (
+        liq_df["timestamp_ms"] < window_end_ms
+    )
+    liq_win = liq_df.loc[liq_mask]
+
+    # 21.  long_liq_vol  (side == "SELL" → long was liquidated)
+    long_liq_vol = float(liq_win.loc[liq_win["side"] == "SELL", "size"].sum())
+
+    # 22.  short_liq_vol  (side == "BUY" → short was liquidated)
+    short_liq_vol = float(liq_win.loc[liq_win["side"] == "BUY", "size"].sum())
+
+    # 23.  net_liq  (short − long)
+    net_liq = short_liq_vol - long_liq_vol
+
+    # 24.  liq_climax  (total liq / total trade volume)
+    total_liq_vol = long_liq_vol + short_liq_vol
+    liq_climax = total_liq_vol / (total_volume + 1e-9)
+
+    # 25.  liq_timing  (1 if >70 % of liq vol in second half, else 0)
+    if total_liq_vol > 0.0:
+        mid_ms = window_start_ms + (window_end_ms - window_start_ms) / 2.0
+        second_half_liq = float(
+            liq_win.loc[liq_win["timestamp_ms"] >= mid_ms, "size"].sum()
+        )
+        liq_timing = 1.0 if (second_half_liq / total_liq_vol) > 0.70 else 0.0
+    else:
+        liq_timing = 0.0
 
     # ------------------------------------------------------------------
-    # Group D — Context                      [keys 24–28]
+    # Group D — Context                      [keys 26–30]
     # ------------------------------------------------------------------
 
-    # 24–25.  Hour cyclicals
+    # 26–27.  Hour cyclicals
     hour = (window_end_ms // 3_600_000) % 24
     hour_sin = math.sin(2.0 * math.pi * hour / 24.0)
     hour_cos = math.cos(2.0 * math.pi * hour / 24.0)
 
-    # 26.  vol_ratio  (window range / 24h average range)
+    # 28.  vol_ratio  (window range / 24h average range)
     if n_trades > 0:
         max_price = float(win["price"].max())
         min_price = float(win["price"].min())
@@ -170,10 +213,10 @@ def extract_features(
     else:
         vol_ratio = 0.0
 
-    # 27.  price_position  ((current − 24h_low) / (24h_high − 24h_low))
+    # 29.  price_position  ((current − 24h_low) / (24h_high − 24h_low))
     price_position = (current_price - _24h_low) / (_24h_high - _24h_low + 1e-9)
 
-    # 28.  trend_slope  ((last − first) / first)
+    # 30.  trend_slope  ((last − first) / first)
     if n_trades > 0:
         first_price = float(win["price"].iloc[0])
         last_price = float(win["price"].iloc[-1])
@@ -182,7 +225,7 @@ def extract_features(
         trend_slope = 0.0
 
     # ------------------------------------------------------------------
-    # Assemble exactly 28 keys
+    # Assemble exactly 30 keys
     # ------------------------------------------------------------------
     return {
         # Group A  (1–12)
@@ -198,23 +241,97 @@ def extract_features(
         "delta_3":             delta_3,
         "delta_4":             delta_4,
         "delta_5":             delta_5,
-        # Group B  (13–18)  reserved
-        "b_bid_imbalance":     b_bid_imbalance,
-        "b_ask_imbalance":     b_ask_imbalance,
-        "b_spread":            b_spread,
-        "b_bid_depth_change":  b_bid_depth_change,
-        "b_ask_depth_change":  b_ask_depth_change,
-        "b_wall_pressure":     b_wall_pressure,
-        # Group C  (19–23)  reserved
-        "c_liq_net":           c_liq_net,
-        "c_long_liq_volume":   c_long_liq_volume,
-        "c_short_liq_volume":  c_short_liq_volume,
-        "c_liq_intensity":     c_liq_intensity,
-        "c_liq_price_deviation": c_liq_price_deviation,
-        # Group D  (24–28)
+        # Group B  (13–20)
+        "bid_ask_imbalance":   bid_ask_imbalance,
+        "bid_wall":            bid_wall,
+        "ask_wall":            ask_wall,
+        "wall_asymmetry":      wall_asymmetry,
+        "depth_trend":         depth_trend,
+        "spread_bps":          spread_bps,
+        "spread_change":       spread_change,
+        "book_depth_slope":    book_depth_slope,
+        # Group C  (21–25)
+        "long_liq_vol":        long_liq_vol,
+        "short_liq_vol":       short_liq_vol,
+        "net_liq":             net_liq,
+        "liq_climax":          liq_climax,
+        "liq_timing":           liq_timing,
+        # Group D  (26–30)
         "hour_sin":            hour_sin,
         "hour_cos":            hour_cos,
         "vol_ratio":           vol_ratio,
         "price_position":      price_position,
         "trend_slope":         trend_slope,
     }
+
+
+# ---------------------------------------------------------------------------
+# Book depth helpers
+# ---------------------------------------------------------------------------
+
+def _top_sizes(
+    levels: list[tuple[float, float]], n: int
+) -> list[float]:
+    """Return the *size* of the first min(n, len(levels)) entries."""
+    return [sz for _, sz in levels[:n]]
+
+
+def _max_size(levels: list[tuple[float, float]], n: int) -> float:
+    """Largest size among the top *n* levels (0.0 if empty)."""
+    sizes = _top_sizes(levels, n)
+    return max(sizes) if sizes else 0.0
+
+
+def _bid_ask_imbalance(
+    bids: list[tuple[float, float]],
+    asks: list[tuple[float, float]],
+    n: int = 5,
+) -> float:
+    """Total top-N bid size / total top-N ask size."""
+    total_bid = sum(_top_sizes(bids, n))
+    total_ask = sum(_top_sizes(asks, n))
+    return total_bid / (total_ask + 1e-9)
+
+
+def _spread_bps(
+    bids: list[tuple[float, float]],
+    asks: list[tuple[float, float]],
+) -> float:
+    """(best_ask - best_bid) / mid * 10000.  0.0 if either side is empty."""
+    if not bids or not asks:
+        return 0.0
+    best_bid = bids[0][0]
+    best_ask = asks[0][0]
+    mid = (best_bid + best_ask) / 2.0
+    return (best_ask - best_bid) / (mid + 1e-9) * 10000.0
+
+
+def _depth_slope(
+    bids: list[tuple[float, float]],
+    asks: list[tuple[float, float]],
+    n: int = 5,
+) -> float:
+    """
+    Linear slope of cumulative combined depth across levels 0..n-1.
+
+    x = [0, 1, ..., n-1]
+    y[i] = sum(combined_depth[j] for j=0..i)
+
+    Returns 0.0 if fewer than 2 levels exist on both sides combined.
+    """
+    bid_sizes = _top_sizes(bids, n)
+    ask_sizes = _top_sizes(asks, n)
+    max_len = max(len(bid_sizes), len(ask_sizes))
+    if max_len < 2:
+        return 0.0
+
+    # Pad shorter side with zeros
+    combined = [
+        (bid_sizes[i] if i < len(bid_sizes) else 0.0)
+        + (ask_sizes[i] if i < len(ask_sizes) else 0.0)
+        for i in range(max_len)
+    ]
+    cumulative = np.cumsum(combined, dtype=np.float64)
+    x = np.arange(len(cumulative), dtype=np.float64)
+    slope, _ = np.polyfit(x, cumulative, deg=1)
+    return float(slope)
