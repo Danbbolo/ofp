@@ -66,33 +66,36 @@ def _build_book_snapshots(book_raw: pd.DataFrame) -> dict[int, tuple[list, list]
     """
     ONE streaming pass: apply all 28M book deltas → 1-second snapshots.
 
-    Returns a dict keyed by **millisecond** timestamp.
-    Uses OrderBookReconstructor directly (avoids pandas groupby overhead).
+    Converts columns in-place to avoid memory duplication.
+    Uses numpy array indexing (no itertuples/namedtuple overhead).
     """
     print("  Building 1s book snapshots …", flush=True)
 
-    # Subset + convert types in one go
-    book = book_raw[["event_time", "event_type", "side", "price", "quantity"]].copy()
-    book["price"] = book["price"].astype(float)
-    book["quantity"] = book["quantity"].astype(float)
+    # Convert in-place — no copy
+    cols = book_raw[["event_time", "event_type", "side", "price", "quantity"]]
+    ev = cols["event_time"].values.astype("int64")
+    tp = cols["event_type"].values
+    sd = cols["side"].values
+    px = cols["price"].values.astype(float)
+    qt = cols["quantity"].values.astype(float)
+    n = len(ev)
 
     recon = OrderBookReconstructor()
     snapshots: dict[int, tuple[list, list]] = {}
     current_bucket_ms = -1
 
-    for row in book.itertuples(index=False):
-        ts_ms = int(row.event_time)          # already ms
-        bucket = ts_ms // 1000               # 1-second bucket
+    for i in range(n):
+        ts = int(ev[i])
+        bucket = ts // 1000
 
         if bucket != current_bucket_ms and current_bucket_ms != -1:
             snapshots[current_bucket_ms * 1000] = recon.top_n(20)
         current_bucket_ms = bucket
 
-        if row.event_type == "snapshot":
+        if tp[i] == "snapshot":
             recon.clear()
-        recon.apply(side=row.side, price=row.price, quantity=row.quantity)
+        recon.apply(side=str(sd[i]), price=float(px[i]), quantity=float(qt[i]))
 
-    # Final bucket
     if current_bucket_ms != -1:
         snapshots[current_bucket_ms * 1000] = recon.top_n(20)
 
@@ -136,6 +139,7 @@ def main(date_str: str) -> None:
     print("  Converting types …", flush=True)
     trades_df = _prepare_trades(trades_raw)
     liq_df = _prepare_liq(liq_raw)
+    del trades_raw  # free memory
 
     # Sort (needed for binary search)
     trades_df = trades_df.sort_values("timestamp_ms").reset_index(drop=True)
@@ -143,6 +147,7 @@ def main(date_str: str) -> None:
 
     # --- Pre-build book snapshots ---
     book_snapshots = _build_book_snapshots(book_raw)
+    del book_raw  # free 28M rows
 
     # --- Compute globals ---
     rolling_avg_volume = float(trades_df["size"].sum() / max(len(trades_df), 1))
