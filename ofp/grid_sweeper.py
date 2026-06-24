@@ -169,7 +169,7 @@ class GridSweeper:
 
                     # Labels
                     outcome_pct = (future_px - current_px) / current_px
-                    outcome_binary = 1 if outcome_pct > 0.001 else 0
+                    outcome_binary = 1 if outcome_pct > 0 else 0
 
                     yield {
                         **feats,

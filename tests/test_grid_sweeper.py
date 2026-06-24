@@ -121,12 +121,12 @@ class TestOutcomeBinary:
         assert r["outcome_pct"] == pytest.approx(100.0 / 70000.0, rel=1e-6)
         assert r["outcome_binary"] == 1
 
-    def test_binary_zero_when_up_barely(self) -> None:
-        """Future price up only 0.05 % → outcome_binary = 0."""
+    def test_binary_one_when_up_any_amount(self) -> None:
+        """Future price up +0.05 % → outcome_binary = 1 (>0 threshold)."""
         trades = _trades_df([
             (0,     70000.0, 1.0, False),
             (2000,  70000.0, 1.0, False),
-            (3000,  70035.0, 1.0, False),   # +0.05 % → ≤ 0.1 %
+            (3000,  70035.0, 1.0, False),   # +0.05 %
         ])
         book = _book_snapshot_df(0)
 
@@ -139,7 +139,7 @@ class TestOutcomeBinary:
         ))
 
         assert len(results) == 1
-        assert results[0]["outcome_binary"] == 0
+        assert results[0]["outcome_binary"] == 1
 
     def test_binary_zero_when_down(self) -> None:
         """Future price below current → outcome_binary = 0."""
