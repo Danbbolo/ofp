@@ -88,26 +88,34 @@ def _build_book_snapshots_multi(
         if day_idx == 0:
             print(f"    [debug] book columns: {list(df.columns)}")
             print(f"    [debug] event_type values: {df['event_type'].value_counts().to_dict()}")
-            print(f"    [debug] first 3 rows:\n{df.head(3).to_string()}")
         day_idx += 1
-        ev = df["event_time"].values.astype("int64")
-        tp = df["event_type"].values
-        sd = df["side"].values
-        px = df["price"].values.astype(float)
-        qt = df["quantity"].values.astype(float)
-        n = len(ev)
 
-        for i in range(n):
-            bucket = int(ev[i]) // 1000
-            if bucket != current_bucket_ms and current_bucket_ms != -1:
-                snapshots[current_bucket_ms * 1000] = recon.top_n(20)
-            current_bucket_ms = bucket
-            if tp[i] == "snapshot":
-                recon.clear()
-            recon.apply(side=str(sd[i]), price=float(px[i]), quantity=float(qt[i]))
+        # Process in chunks to limit memory (~500K rows at a time)
+        import pyarrow.parquet as pq
+        pf = pq.ParquetFile(fpath)
+        day_rows = 0
+        for batch in pf.iter_batches(batch_size=500_000):
+            rows = batch.to_pandas()
+            ev = rows["event_time"].values.astype("int64")
+            tp = rows["event_type"].values
+            sd = rows["side"].values
+            px = rows["price"].values.astype(float)
+            qt = rows["quantity"].values.astype(float)
+            m = len(ev)
 
-        total_rows += n
-        print(f"    {date_str}: {n:,} rows → {len(snapshots):,} snapshots",
+            for i in range(m):
+                bucket = int(ev[i]) // 1000
+                if bucket != current_bucket_ms and current_bucket_ms != -1:
+                    snapshots[current_bucket_ms * 1000] = recon.top_n(20)
+                current_bucket_ms = bucket
+                if tp[i] == "snapshot":
+                    recon.clear()
+                recon.apply(side=str(sd[i]), price=float(px[i]), quantity=float(qt[i]))
+
+            day_rows += m
+
+        total_rows += day_rows
+        print(f"    {date_str}: {day_rows:,} rows → {len(snapshots):,} snapshots",
               flush=True)
         d += timedelta(days=1)
 
