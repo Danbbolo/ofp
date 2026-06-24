@@ -25,15 +25,9 @@ def _trades_df(rows: list[tuple]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["timestamp_ms", "price", "size", "is_buyer_maker"])
 
 
-def _book_snapshot_df(ts: int = 0) -> pd.DataFrame:
-    """Minimal book snapshot at *ts* (nanoseconds)."""
-    rows = [
-        {"received_time": ts + 1000, "event_time": ts, "symbol": "BTCUSDT",
-         "event_type": "snapshot", "side": "bid", "price": 68000.0, "quantity": 1.0},
-        {"received_time": ts + 1000, "event_time": ts, "symbol": "BTCUSDT",
-         "event_type": "snapshot", "side": "ask", "price": 68100.0, "quantity": 2.0},
-    ]
-    return pd.DataFrame(rows)
+def _book_snapshots(ts: int = 0) -> dict[int, tuple[list, list]]:
+    """Minimal book snapshot dict keyed by ms timestamp."""
+    return {ts: ([(68000.0, 1.0)], [(68100.0, 2.0)])}
 
 
 def _empty_liq_df() -> pd.DataFrame:
@@ -52,12 +46,12 @@ class TestWindowCount:
         trades = _trades_df([
             (i * 1000, 70000.0, 1.0, False) for i in range(20)
         ])
-        book = _book_snapshot_df(0)
+        book = _book_snapshots(0)
 
         sweeper = GridSweeper(window_sizes_sec=[2], horizons_sec=[1])
         results = list(sweeper.sweep(
             trades_df=trades,
-            book_df=book,
+            book_snapshots=book,
             liq_df=_empty_liq_df(),
             rolling_avg_volume=1000.0,
         ))
@@ -71,12 +65,12 @@ class TestWindowCount:
         trades = _trades_df([
             (i * 1000, 70000.0, 1.0, False) for i in range(30)
         ])
-        book = _book_snapshot_df(0)
+        book = _book_snapshots(0)
 
         sweeper = GridSweeper(window_sizes_sec=[2, 4], horizons_sec=[1, 2])
         results = list(sweeper.sweep(
             trades_df=trades,
-            book_df=book,
+            book_snapshots=book,
             liq_df=_empty_liq_df(),
             rolling_avg_volume=1000.0,
         ))
@@ -106,12 +100,12 @@ class TestOutcomeBinary:
             (2000,  70000.0, 1.0, False),   # window end (win=2s)
             (3000,  70100.0, 1.0, False),   # future: +0.143 % → > 0.1 %
         ])
-        book = _book_snapshot_df(0)
+        book = _book_snapshots(0)
 
         sweeper = GridSweeper(window_sizes_sec=[2], horizons_sec=[1])
         results = list(sweeper.sweep(
             trades_df=trades,
-            book_df=book,
+            book_snapshots=book,
             liq_df=_empty_liq_df(),
             rolling_avg_volume=1000.0,
         ))
@@ -128,12 +122,12 @@ class TestOutcomeBinary:
             (2000,  70000.0, 1.0, False),
             (3000,  70035.0, 1.0, False),   # +0.05 %
         ])
-        book = _book_snapshot_df(0)
+        book = _book_snapshots(0)
 
         sweeper = GridSweeper(window_sizes_sec=[2], horizons_sec=[1])
         results = list(sweeper.sweep(
             trades_df=trades,
-            book_df=book,
+            book_snapshots=book,
             liq_df=_empty_liq_df(),
             rolling_avg_volume=1000.0,
         ))
@@ -148,12 +142,12 @@ class TestOutcomeBinary:
             (2000,  70000.0, 1.0, False),
             (3000,  69800.0, 1.0, False),   # down
         ])
-        book = _book_snapshot_df(0)
+        book = _book_snapshots(0)
 
         sweeper = GridSweeper(window_sizes_sec=[2], horizons_sec=[1])
         results = list(sweeper.sweep(
             trades_df=trades,
-            book_df=book,
+            book_snapshots=book,
             liq_df=_empty_liq_df(),
             rolling_avg_volume=1000.0,
         ))
@@ -167,12 +161,12 @@ class TestOutcomeBinary:
             (2000,  70000.0, 1.0, False),
             (3000,  70000.0, 1.0, False),
         ])
-        book = _book_snapshot_df(0)
+        book = _book_snapshots(0)
 
         sweeper = GridSweeper(window_sizes_sec=[2], horizons_sec=[1])
         results = list(sweeper.sweep(
             trades_df=trades,
-            book_df=book,
+            book_snapshots=book,
             liq_df=_empty_liq_df(),
             rolling_avg_volume=1000.0,
         ))
@@ -188,12 +182,12 @@ class TestGeneratorBehaviour:
         trades = _trades_df([
             (i * 1000, 70000.0 + i, 1.0, False) for i in range(20)
         ])
-        book = _book_snapshot_df(0)
+        book = _book_snapshots(0)
 
         sweeper = GridSweeper(window_sizes_sec=[2], horizons_sec=[1])
         gen = sweeper.sweep(
             trades_df=trades,
-            book_df=book,
+            book_snapshots=book,
             liq_df=_empty_liq_df(),
             rolling_avg_volume=1000.0,
         )
@@ -220,12 +214,12 @@ class TestGeneratorBehaviour:
         trades = _trades_df([
             (i * 1000, 70000.0 + i, 1.0, False) for i in range(20)
         ])
-        book = _book_snapshot_df(0)
+        book = _book_snapshots(0)
 
         sweeper = GridSweeper(window_sizes_sec=[2], horizons_sec=[1])
         gen = sweeper.sweep(
             trades_df=trades,
-            book_df=book,
+            book_snapshots=book,
             liq_df=_empty_liq_df(),
             rolling_avg_volume=1000.0,
         )

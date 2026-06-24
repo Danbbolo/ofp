@@ -1,9 +1,9 @@
 """
 run_research.py — Fetch 1 day of BTCUSDT data and run a full grid sweep.
 
-Uses the ``cryptohftdata`` Python client to pull historical trades,
-order-book deltas, and liquidations, then feeds them through the
-``GridSweeper``.
+- ONE datatype conversion pass at the start.
+- Pre-builds 1-second book snapshots into a dict (ms-keyed).
+- GridSweeper does binary-search slicing only.
 
 Usage::
 
@@ -15,12 +15,12 @@ Output: ``data/research_dataset.parquet``
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 import cryptohftdata as chd
 import pandas as pd
 
+from ofp.book_reconstructor import OrderBookReconstructor
 from ofp.grid_sweeper import GridSweeper
 
 # ---------------------------------------------------------------------------
@@ -35,22 +35,15 @@ WINDOW_SIZES_SEC = [60, 120, 180, 300, 600]
 HORIZONS_SEC = [300, 900, 1800, 3600, 14400]
 OUTPUT_DIR = Path("data")
 OUTPUT_FILE = OUTPUT_DIR / "research_dataset.parquet"
-PROGRESS_EVERY = 10_000  # rows
+PROGRESS_EVERY = 10_000
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Pre-conversion helpers  (ONE pass, string→float/int64)
 # ---------------------------------------------------------------------------
 
 def _prepare_trades(df: pd.DataFrame) -> pd.DataFrame:
-    """Convert cryptohftdata trades DataFrame to ``extract_features`` format.
-
-    Input:  received_time, event_time, symbol, trade_id, price(str),
-            quantity(str), trade_time, is_buyer_maker, order_type
-    Output: timestamp_ms, price, size, is_buyer_maker
-
-    NOTE: ``trade_time`` is already in **milliseconds** (13-digit Unix ms).
-    """
+    """trade_time (ms) → timestamp_ms.  price/quantity str → float."""
     out = df.rename(columns={"trade_time": "timestamp_ms", "quantity": "size"})
     out["timestamp_ms"] = out["timestamp_ms"].astype("int64")
     out["price"] = out["price"].astype(float)
@@ -58,41 +51,53 @@ def _prepare_trades(df: pd.DataFrame) -> pd.DataFrame:
     return out[["timestamp_ms", "price", "size", "is_buyer_maker"]]
 
 
-def _prepare_book(df: pd.DataFrame) -> pd.DataFrame:
-    """Convert cryptohftdata orderbook DataFrame for OrderBookReconstructor.
-
-    Keeps only the columns needed: event_time, event_type, side, price, quantity.
-    Converts price/quantity from string to float.
-
-    NOTE: ``event_time`` arrives in **milliseconds** but ``OrderBookReconstructor``
-    expects nanoseconds, so we multiply by 1_000_000.
-    """
-    out = df[["event_time", "event_type", "side", "price", "quantity"]].copy()
-    out["event_time"] = (out["event_time"] * 1_000_000).astype("int64")
-    out["price"] = out["price"].astype(float)
-    out["quantity"] = out["quantity"].astype(float)
-    return out
-
-
 def _prepare_liq(df: pd.DataFrame) -> pd.DataFrame:
-    """Convert cryptohftdata liquidations DataFrame for extract_features.
-
-    Input may have columns: timestamp, side, price, quantity, order_id
-    Output: timestamp_ms, side, price, size
-    """
+    """timestamp → timestamp_ms.  quantity → size.  price str → float."""
     if df.empty or len(df.columns) == 0:
         return pd.DataFrame(columns=["timestamp_ms", "side", "price", "size"])
     out = df.rename(columns={"timestamp": "timestamp_ms", "quantity": "size"})
     out["timestamp_ms"] = out["timestamp_ms"].astype("int64")
-    if "price" in out.columns:
-        out["price"] = out["price"].astype(float)
-    else:
-        out["price"] = 0.0
-    if "size" in out.columns:
-        out["size"] = out["size"].astype(float)
-    else:
-        out["size"] = 0.0
+    out["price"] = out.get("price", pd.Series([0.0] * len(out))).astype(float)
+    out["size"] = out.get("size", pd.Series([0.0] * len(out))).astype(float)
     return out[["timestamp_ms", "side", "price", "size"]]
+
+
+def _build_book_snapshots(book_raw: pd.DataFrame) -> dict[int, tuple[list, list]]:
+    """
+    ONE streaming pass: apply all 28M book deltas → 1-second snapshots.
+
+    Returns a dict keyed by **millisecond** timestamp.
+    Uses OrderBookReconstructor directly (avoids pandas groupby overhead).
+    """
+    print("  Building 1s book snapshots …", flush=True)
+
+    # Subset + convert types in one go
+    book = book_raw[["event_time", "event_type", "side", "price", "quantity"]].copy()
+    book["price"] = book["price"].astype(float)
+    book["quantity"] = book["quantity"].astype(float)
+
+    recon = OrderBookReconstructor()
+    snapshots: dict[int, tuple[list, list]] = {}
+    current_bucket_ms = -1
+
+    for row in book.itertuples(index=False):
+        ts_ms = int(row.event_time)          # already ms
+        bucket = ts_ms // 1000               # 1-second bucket
+
+        if bucket != current_bucket_ms and current_bucket_ms != -1:
+            snapshots[current_bucket_ms * 1000] = recon.top_n(20)
+        current_bucket_ms = bucket
+
+        if row.event_type == "snapshot":
+            recon.clear()
+        recon.apply(side=row.side, price=row.price, quantity=row.quantity)
+
+    # Final bucket
+    if current_bucket_ms != -1:
+        snapshots[current_bucket_ms * 1000] = recon.top_n(20)
+
+    print(f"  {len(snapshots):,} snapshots built.", flush=True)
+    return snapshots
 
 
 # ---------------------------------------------------------------------------
@@ -100,100 +105,84 @@ def _prepare_liq(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def main(date_str: str) -> None:
-    print(f"Fetching {SYMBOL} data for {date_str} via cryptohftdata …")
-    print(f"  Window sizes (sec): {WINDOW_SIZES_SEC}")
-    print(f"  Horizons     (sec): {HORIZONS_SEC}")
+    print(f"Fetching {SYMBOL} data for {date_str} …")
+    print(f"  Windows: {WINDOW_SIZES_SEC}")
+    print(f"  Horizons: {HORIZONS_SEC}")
 
     client = chd.CryptoHFTDataClient(api_key=API_KEY)
 
-    # ------------------------------------------------------------------
-    # Fetch
-    # ------------------------------------------------------------------
-    print("  Downloading trades …")
-    trades_raw = client.get_trades(
-        symbol=SYMBOL, exchange=EXCHANGE,
-        start_date=date_str, end_date=date_str,
-    )
+    # --- Fetch ---
+    print("  Downloading trades …", flush=True)
+    trades_raw = client.get_trades(symbol=SYMBOL, exchange=EXCHANGE,
+                                   start_date=date_str, end_date=date_str)
 
-    print("  Downloading orderbook …")
-    book_raw = client.get_orderbook(
-        symbol=SYMBOL, exchange=EXCHANGE,
-        start_date=date_str, end_date=date_str,
-    )
+    print("  Downloading orderbook …", flush=True)
+    book_raw = client.get_orderbook(symbol=SYMBOL, exchange=EXCHANGE,
+                                    start_date=date_str, end_date=date_str)
 
-    print("  Downloading liquidations …")
-    liq_raw = client.get_liquidations(
-        symbol=SYMBOL, exchange=EXCHANGE,
-        start_date=date_str, end_date=date_str,
-    )
+    print("  Downloading liquidations …", flush=True)
+    liq_raw = client.get_liquidations(symbol=SYMBOL, exchange=EXCHANGE,
+                                      start_date=date_str, end_date=date_str)
 
     print(f"  Trades:       {len(trades_raw):,} rows")
     print(f"  Book deltas:  {len(book_raw):,} rows")
     print(f"  Liquidations: {len(liq_raw):,} rows")
 
     if trades_raw.empty:
-        print("ERROR: No trade data fetched.  Check the date and API key.")
+        print("ERROR: No trade data fetched.")
         sys.exit(1)
 
-    # ------------------------------------------------------------------
-    # Prepare
-    # ------------------------------------------------------------------
-    print("  Preparing DataFrames …")
+    # --- ONE conversion pass ---
+    print("  Converting types …", flush=True)
     trades_df = _prepare_trades(trades_raw)
     liq_df = _prepare_liq(liq_raw)
 
-    # Book data is passed as-is — GridSweeper accesses columns directly
-    # and converts price/quantity to float on-the-fly in the streaming loop.
+    # Sort (needed for binary search)
+    trades_df = trades_df.sort_values("timestamp_ms").reset_index(drop=True)
+    liq_df = liq_df.sort_values("timestamp_ms").reset_index(drop=True)
 
+    # --- Pre-build book snapshots ---
+    book_snapshots = _build_book_snapshots(book_raw)
+
+    # --- Compute globals ---
     rolling_avg_volume = float(trades_df["size"].sum() / max(len(trades_df), 1))
-
     _24h_stats = {
         "_24h_avg_range": float(trades_df["price"].max() - trades_df["price"].min()),
         "_24h_low": float(trades_df["price"].min()),
         "_24h_high": float(trades_df["price"].max()),
     }
-
     print(f"  Rolling avg volume: {rolling_avg_volume:.4f}")
-    print(f"  24h high/low/range: {_24h_stats['_24h_high']:.2f} / "
-          f"{_24h_stats['_24h_low']:.2f} / {_24h_stats['_24h_avg_range']:.2f}")
-    print("  Sweeping …")
+    print(f"  24h range: {_24h_stats['_24h_low']:.2f} – {_24h_stats['_24h_high']:.2f}")
+    print("  Sweeping …", flush=True)
 
-    # ------------------------------------------------------------------
-    # Sweep
-    # ------------------------------------------------------------------
-    sweeper = GridSweeper(
-        window_sizes_sec=WINDOW_SIZES_SEC,
-        horizons_sec=HORIZONS_SEC,
-    )
+    # --- Sweep ---
+    sweeper = GridSweeper(window_sizes_sec=WINDOW_SIZES_SEC,
+                          horizons_sec=HORIZONS_SEC)
     gen = sweeper.sweep(
         trades_df=trades_df,
-        book_df=book_raw,
+        book_snapshots=book_snapshots,
         liq_df=liq_df,
         rolling_avg_volume=rolling_avg_volume,
         _24h_stats=_24h_stats,
     )
 
-    # Progress reporter
-    def _progress_wrapper(iterator):
-        count = 0
+    def _progress(iterator):
+        n = 0
         for row in iterator:
             yield row
-            count += 1
-            if count % PROGRESS_EVERY == 0:
-                print(f"    Processed {count:,} windows …")
+            n += 1
+            if n % PROGRESS_EVERY == 0:
+                print(f"    Processed {n:,} windows …", flush=True)
 
-    # ------------------------------------------------------------------
-    # Save
-    # ------------------------------------------------------------------
+    # --- Save ---
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    GridSweeper.save_to_disk(_progress_wrapper(gen), str(OUTPUT_FILE))
+    GridSweeper.save_to_disk(_progress(gen), str(OUTPUT_FILE))
 
-    # Report
     result = pd.read_parquet(OUTPUT_FILE)
-    file_size_mb = OUTPUT_FILE.stat().st_size / (1024 * 1024)
+    size_mb = OUTPUT_FILE.stat().st_size / (1024 * 1024)
     print(f"  Done.")
     print(f"  File:  {OUTPUT_FILE.resolve()}")
-    print(f"  Size:  {file_size_mb:.2f} MB")
+    print(f"  Size:  {size_mb:.2f} MB")
     print(f"  Rows:  {len(result):,}")
     print(f"  Cols:  {list(result.columns)}")
     print()

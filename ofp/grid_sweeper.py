@@ -1,10 +1,8 @@
 """
 grid_sweeper.py — Parametric grid sweep across historical data.
 
-Slides windows over trades, book deltas, and liquidations, extracts
-features via ``extract_features()``, computes forward returns, and
-yields labelled rows one at a time (generator).  Supports chunked
-parquet output via ``save_to_disk()``.
+Receives pre-converted DataFrames and pre-built book snapshot dict.
+Slides windows, extracts features, computes labels, yields one dict at a time.
 """
 
 from __future__ import annotations
@@ -16,21 +14,11 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from ofp.book_reconstructor import OrderBookReconstructor
 from ofp.feature_extractor import extract_features
 
 
 class GridSweeper:
-    """
-    Slides feature-extraction windows across historical data.
-
-    Parameters
-    ----------
-    window_sizes_sec : list[int]
-        Window durations in seconds, e.g. ``[60, 120, 300]``.
-    horizons_sec : list[int]
-        Forward-return horizons in seconds, e.g. ``[300, 900, 3600]``.
-    """
+    """Slides feature-extraction windows across pre-processed historical data."""
 
     def __init__(
         self,
@@ -52,7 +40,7 @@ class GridSweeper:
     def sweep(
         self,
         trades_df: pd.DataFrame,
-        book_df: pd.DataFrame,
+        book_snapshots: dict[int, tuple[list[tuple[float, float]], list[tuple[float, float]]]],
         liq_df: pd.DataFrame,
         rolling_avg_volume: float,
         _24h_stats: dict[str, float] | None = None,
@@ -60,90 +48,27 @@ class GridSweeper:
         """
         Yield one feature+label dict per (window, horizon, step).
 
-        Nothing is accumulated — the caller must consume the generator
-        and persist rows as needed.
-
-        Parameters
-        ----------
-        trades_df : DataFrame
-            Columns: ``timestamp_ms``, ``price``, ``size``, ``is_buyer_maker``.
-        book_df : DataFrame
-            ``BookSnapshotData`` columns.  Will be reconstructed into 1 s
-            snapshots via ``OrderBookReconstructor``.
-        liq_df : DataFrame
-            Columns: ``timestamp_ms``, ``side``, ``price``, ``size``.
-        rolling_avg_volume : float
-            Long-term average volume for normalisation.
-        _24h_stats : dict | None
-            Optional keys: ``_24h_avg_range``, ``_24h_low``, ``_24h_high``,
-            ``current_price``.
+        All DataFrames must be pre-sorted and pre-typed (no string columns).
+        *book_snapshots* is a dict keyed by **millisecond** timestamp.
         """
         if _24h_stats is None:
             _24h_stats = {}
 
-        # ------------------------------------------------------------------
-        # Sort source data
-        # ------------------------------------------------------------------
-        trades = trades_df.sort_values("timestamp_ms").reset_index(drop=True)
-        liq = liq_df.sort_values("timestamp_ms").reset_index(drop=True)
+        trades = trades_df
+        liq = liq_df
 
-        # ------------------------------------------------------------------
-        # Stream book snapshots — data is ~monotonic (cryptohftdata per-hour).
-        # A single out-of-order row (<0.004%) is harmless for the book state.
-        # ------------------------------------------------------------------
-        print("  [sweep] extracting book columns …", flush=True)
-        book_events = book_df["event_time"].values   # ms, int64
-        book_types = book_df["event_type"].values
-        book_sides = book_df["side"].values
-        book_prices = book_df["price"].values
-        book_qtys = book_df["quantity"].values
-        n_book = len(book_df)
+        # Book lookup
+        snap_ts = np.array(sorted(book_snapshots.keys()), dtype=np.int64)
 
-        print(f"  [sweep] book arrays ready, n={n_book:,}, entering loop …")
-
-        # ------------------------------------------------------------------
-        # Pre-build 1-second book snapshots in a single streaming pass.
-        # 28M rows → ~86400 snapshots; each window then binary-searches.
-        # ------------------------------------------------------------------
-        import sys
-        print("  [sweep] building book snapshots …", flush=True)
-        recon = OrderBookReconstructor()
-        snap_list: list[tuple[int, list, list]] = []
-        current_bucket = -1
-
-        for i in range(n_book):
-            ts = int(book_events[i])
-            bucket = ts // 1000  # 1-second bucket in ms
-
-            if bucket != current_bucket and current_bucket != -1:
-                snap_list.append((current_bucket * 1000, *recon.top_n(20)))
-            current_bucket = bucket
-
-            if book_types[i] == "snapshot":
-                recon.clear()
-            recon.apply(
-                side=str(book_sides[i]),
-                price=float(book_prices[i]),
-                quantity=float(book_qtys[i]),
-            )
-
-        # Final bucket
-        if current_bucket != -1:
-            snap_list.append((current_bucket * 1000, *recon.top_n(20)))
-
-        snap_ts = np.array([s[0] for s in snap_list], dtype=np.int64)
-
-        def _book_at(target_ms: int) -> tuple[list, list]:
+        def _book_at(target_ms: int) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
             if len(snap_ts) == 0:
                 return ([], [])
             idx = int(np.searchsorted(snap_ts, target_ms, side="right")) - 1
             if idx < 0:
                 return ([], [])
-            return snap_list[idx][1], snap_list[idx][2]
+            return book_snapshots[int(snap_ts[idx])]
 
-        # ------------------------------------------------------------------
-        # Price lookup helpers  (binary-search for O(log N) per window)
-        # ------------------------------------------------------------------
+        # Price lookup & slicing
         trade_ts = trades["timestamp_ms"].values
         trade_px = trades["price"].values
 
@@ -153,25 +78,21 @@ class GridSweeper:
                 return None
             return float(trade_px[idx])
 
-        def _slice_window(win_start: int, win_end: int) -> pd.DataFrame:
-            """Return trades in [win_start, win_end) using binary search."""
-            lo = int(np.searchsorted(trade_ts, win_start, side="left"))
-            hi = int(np.searchsorted(trade_ts, win_end, side="left"))
+        def _slice_trades(lo_ms: int, hi_ms: int) -> pd.DataFrame:
+            lo = int(np.searchsorted(trade_ts, lo_ms, side="left"))
+            hi = int(np.searchsorted(trade_ts, hi_ms, side="left"))
             return trades.iloc[lo:hi]
 
-        # Liquidation slicing
         liq_ts = liq["timestamp_ms"].values
 
-        def _slice_liq(win_start: int, win_end: int) -> pd.DataFrame:
-            lo = int(np.searchsorted(liq_ts, win_start, side="left"))
-            hi = int(np.searchsorted(liq_ts, win_end, side="left"))
+        def _slice_liq(lo_ms: int, hi_ms: int) -> pd.DataFrame:
+            lo = int(np.searchsorted(liq_ts, lo_ms, side="left"))
+            hi = int(np.searchsorted(liq_ts, hi_ms, side="left"))
             return liq.iloc[lo:hi]
 
-        # ------------------------------------------------------------------
-        # Time range
-        # ------------------------------------------------------------------
-        data_start_ms = int(trades["timestamp_ms"].iloc[0])
-        data_end_ms = int(trades["timestamp_ms"].iloc[-1])
+        # Sweep
+        data_start_ms = int(trade_ts[0])
+        data_end_ms = int(trade_ts[-1])
 
         # ------------------------------------------------------------------
         # Sweep
@@ -186,25 +107,19 @@ class GridSweeper:
 
                 while win_start + window_ms + horizon_ms <= data_end_ms:
                     win_end = win_start + window_ms
-                    future_target_ms = win_end + horizon_ms
+                    future_ms = win_end + horizon_ms
 
-                    # Book snapshots (event_time is in ms)
-                    book_start = _book_at(win_start)
-                    book_end = _book_at(win_end)
-
-                    # Current & future price
                     current_px = _price_at(win_end)
-                    future_px = _price_at(future_target_ms)
+                    future_px = _price_at(future_ms)
 
                     if current_px is None or future_px is None:
                         win_start += step_ms
                         continue
 
-                    # Features  (pre-sliced trades for O(1) window access)
                     feats = extract_features(
-                        trades_df=_slice_window(win_start, win_end),
-                        book_snapshot_start=book_start,
-                        book_snapshot_end=book_end,
+                        trades_df=_slice_trades(win_start, win_end),
+                        book_snapshot_start=_book_at(win_start),
+                        book_snapshot_end=_book_at(win_end),
                         liq_df=_slice_liq(win_start, win_end),
                         window_start_ms=win_start,
                         window_end_ms=win_end,
