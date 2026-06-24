@@ -104,7 +104,7 @@ def _build_book_snapshots_multi(
             m = len(ev)
 
             for i in range(m):
-                sec = int(ev[i].as_py()) // 1000
+                sec = int(ev[i]) // 1000
 
                 if sec != current_sec and bucket_rows:
                     recon.clear()
