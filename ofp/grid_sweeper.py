@@ -9,7 +9,6 @@ parquet output via ``save_to_disk()``.
 
 from __future__ import annotations
 
-import bisect
 from typing import Any, Iterator
 
 import numpy as np
@@ -89,35 +88,84 @@ class GridSweeper:
         liq = liq_df.sort_values("timestamp_ms").reset_index(drop=True)
 
         # ------------------------------------------------------------------
-        # Pre-build 1-second book snapshots
+        # Stream book snapshots — data is ~monotonic (cryptohftdata per-hour).
+        # A single out-of-order row (<0.004%) is harmless for the book state.
         # ------------------------------------------------------------------
-        recon = OrderBookReconstructor()
-        book_snapshots: list[tuple[int, list, list]] = list(
-            recon.iter_bucketed_snapshots(book_df, interval_ns=1_000_000_000, n=20)
-        )
-        snap_ts = np.array([sn[0] for sn in book_snapshots], dtype=np.int64)
+        print("  [sweep] extracting book columns …", flush=True)
+        book_events = book_df["event_time"].values   # ms, int64
+        book_types = book_df["event_type"].values
+        book_sides = book_df["side"].values
+        book_prices = book_df["price"].values
+        book_qtys = book_df["quantity"].values
+        n_book = len(book_df)
 
-        def _book_at(target_ns: int) -> tuple[list, list]:
-            """Return (bids, asks) closest to *target_ns* (inclusive)."""
+        print(f"  [sweep] book arrays ready, n={n_book:,}, entering loop …")
+
+        # ------------------------------------------------------------------
+        # Pre-build 1-second book snapshots in a single streaming pass.
+        # 28M rows → ~86400 snapshots; each window then binary-searches.
+        # ------------------------------------------------------------------
+        import sys
+        print("  [sweep] building book snapshots …", flush=True)
+        recon = OrderBookReconstructor()
+        snap_list: list[tuple[int, list, list]] = []
+        current_bucket = -1
+
+        for i in range(n_book):
+            ts = int(book_events[i])
+            bucket = ts // 1000  # 1-second bucket in ms
+
+            if bucket != current_bucket and current_bucket != -1:
+                snap_list.append((current_bucket * 1000, *recon.top_n(20)))
+            current_bucket = bucket
+
+            if book_types[i] == "snapshot":
+                recon.clear()
+            recon.apply(
+                side=str(book_sides[i]),
+                price=float(book_prices[i]),
+                quantity=float(book_qtys[i]),
+            )
+
+        # Final bucket
+        if current_bucket != -1:
+            snap_list.append((current_bucket * 1000, *recon.top_n(20)))
+
+        snap_ts = np.array([s[0] for s in snap_list], dtype=np.int64)
+
+        def _book_at(target_ms: int) -> tuple[list, list]:
             if len(snap_ts) == 0:
                 return ([], [])
-            idx = int(np.searchsorted(snap_ts, target_ns, side="right")) - 1
+            idx = int(np.searchsorted(snap_ts, target_ms, side="right")) - 1
             if idx < 0:
                 return ([], [])
-            return book_snapshots[idx][1], book_snapshots[idx][2]
+            return snap_list[idx][1], snap_list[idx][2]
 
         # ------------------------------------------------------------------
-        # Price lookup helpers
+        # Price lookup helpers  (binary-search for O(log N) per window)
         # ------------------------------------------------------------------
         trade_ts = trades["timestamp_ms"].values
         trade_px = trades["price"].values
 
         def _price_at(target_ms: int) -> float | None:
-            """First trade price at or after *target_ms*, or None."""
             idx = int(np.searchsorted(trade_ts, target_ms, side="left"))
             if idx >= len(trade_ts):
                 return None
             return float(trade_px[idx])
+
+        def _slice_window(win_start: int, win_end: int) -> pd.DataFrame:
+            """Return trades in [win_start, win_end) using binary search."""
+            lo = int(np.searchsorted(trade_ts, win_start, side="left"))
+            hi = int(np.searchsorted(trade_ts, win_end, side="left"))
+            return trades.iloc[lo:hi]
+
+        # Liquidation slicing
+        liq_ts = liq["timestamp_ms"].values
+
+        def _slice_liq(win_start: int, win_end: int) -> pd.DataFrame:
+            lo = int(np.searchsorted(liq_ts, win_start, side="left"))
+            hi = int(np.searchsorted(liq_ts, win_end, side="left"))
+            return liq.iloc[lo:hi]
 
         # ------------------------------------------------------------------
         # Time range
@@ -140,9 +188,9 @@ class GridSweeper:
                     win_end = win_start + window_ms
                     future_target_ms = win_end + horizon_ms
 
-                    # Book snapshots (ns → ms conversion)
-                    book_start = _book_at(win_start * 1_000_000)
-                    book_end = _book_at(win_end * 1_000_000)
+                    # Book snapshots (event_time is in ms)
+                    book_start = _book_at(win_start)
+                    book_end = _book_at(win_end)
 
                     # Current & future price
                     current_px = _price_at(win_end)
@@ -152,12 +200,12 @@ class GridSweeper:
                         win_start += step_ms
                         continue
 
-                    # Features
+                    # Features  (pre-sliced trades for O(1) window access)
                     feats = extract_features(
-                        trades_df=trades,
+                        trades_df=_slice_window(win_start, win_end),
                         book_snapshot_start=book_start,
                         book_snapshot_end=book_end,
-                        liq_df=liq,
+                        liq_df=_slice_liq(win_start, win_end),
                         window_start_ms=win_start,
                         window_end_ms=win_end,
                         rolling_avg_volume=rolling_avg_volume,

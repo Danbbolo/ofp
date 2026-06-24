@@ -55,12 +55,10 @@ def extract_features(
         Groups B (book) and C (liquidation) are reserved at 0.0.
     """
     # ------------------------------------------------------------------
-    # Filter to window
+    # trades_df is assumed pre-sliced to [window_start_ms, window_end_ms)
+    # by the caller (GridSweeper).  No internal filtering here.
     # ------------------------------------------------------------------
-    mask = (trades_df["timestamp_ms"] >= window_start_ms) & (
-        trades_df["timestamp_ms"] < window_end_ms
-    )
-    win = trades_df.loc[mask].copy()
+    win = trades_df.copy()
 
     # Pre-compute signed size: + for buys (aggressor=BUYER → is_buyer_maker=False),
     #                          − for sells (aggressor=SELLER → is_buyer_maker=True)
@@ -167,11 +165,9 @@ def extract_features(
 
     # ------------------------------------------------------------------
     # Group C — The Forced Errors (Liquidations)  [keys 21–25]
+    # (liq_df is assumed pre-sliced by the caller)
     # ------------------------------------------------------------------
-    liq_mask = (liq_df["timestamp_ms"] >= window_start_ms) & (
-        liq_df["timestamp_ms"] < window_end_ms
-    )
-    liq_win = liq_df.loc[liq_mask]
+    liq_win = liq_df
 
     # 21.  long_liq_vol  (side == "SELL" → long was liquidated)
     long_liq_vol = float(liq_win.loc[liq_win["side"] == "SELL", "size"].sum())

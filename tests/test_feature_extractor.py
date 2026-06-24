@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -40,7 +41,7 @@ def _liq_df(rows: list[tuple]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["timestamp_ms", "side", "price", "size"])
 
 
-# Shorthand for the long call
+# Shorthand for the long call  (pre-slices DataFrames as GridSweeper does)
 def _extract(
     trades,
     rolling_avg: float = 1000.0,
@@ -51,11 +52,25 @@ def _extract(
     liq: pd.DataFrame | None = None,
     **kwargs,
 ):
+    # Pre-slice trades to window
+    ts = trades["timestamp_ms"].values
+    lo = int(np.searchsorted(ts, window_start_ms, side="left"))
+    hi = int(np.searchsorted(ts, window_end_ms, side="left"))
+    trades_win = trades.iloc[lo:hi]
+
+    # Pre-slice liq
+    liq_df = liq if liq is not None else _empty_liq_df()
+    if not liq_df.empty:
+        lq_ts = liq_df["timestamp_ms"].values
+        lq_lo = int(np.searchsorted(lq_ts, window_start_ms, side="left"))
+        lq_hi = int(np.searchsorted(lq_ts, window_end_ms, side="left"))
+        liq_df = liq_df.iloc[lq_lo:lq_hi]
+
     return extract_features(
-        trades_df=trades,
+        trades_df=trades_win,
         book_snapshot_start=book_start if book_start is not None else _empty_book(),
         book_snapshot_end=book_end if book_end is not None else _empty_book(),
-        liq_df=liq if liq is not None else _empty_liq_df(),
+        liq_df=liq_df,
         window_start_ms=window_start_ms,
         window_end_ms=window_end_ms,
         rolling_avg_volume=rolling_avg,
