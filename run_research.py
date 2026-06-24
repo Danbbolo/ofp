@@ -75,6 +75,7 @@ def _build_book_snapshots_multi(
     total_rows = 0
 
     d = start
+    day_idx = 0
     while d <= end:
         date_str = d.strftime("%Y-%m-%d")
         fpath = RAW_DIR / date_str / "book.parquet"
@@ -84,6 +85,11 @@ def _build_book_snapshots_multi(
             continue
 
         df = pd.read_parquet(fpath)
+        if day_idx == 0:
+            print(f"    [debug] book columns: {list(df.columns)}")
+            print(f"    [debug] event_type values: {df['event_type'].value_counts().to_dict()}")
+            print(f"    [debug] first 3 rows:\n{df.head(3).to_string()}")
+        day_idx += 1
         ev = df["event_time"].values.astype("int64")
         tp = df["event_type"].values
         sd = df["side"].values
