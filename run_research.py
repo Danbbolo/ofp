@@ -89,22 +89,24 @@ def _build_book_snapshots_multi(
             print(f"    [debug] event_type values: {df['event_type'].value_counts().to_dict()}")
         day_idx += 1
 
-        # Process in chunks: group by second, build book per-second, discard.
+        # Process via numpy from Arrow batch (no pandas, minimal memory)
         import pyarrow.parquet as pq
         pf = pq.ParquetFile(fpath)
         day_rows = 0
         bucket_rows: list[dict] = []
         current_sec = -1
 
-        for batch in pf.iter_batches(batch_size=500_000):
-            rows = batch.to_pandas()
-            m = len(rows)
+        for batch in pf.iter_batches(batch_size=200_000):
+            ev = batch.column("event_time").to_numpy()
+            sd = batch.column("side").to_pylist()
+            px = batch.column("price").to_pylist()
+            qt = batch.column("quantity").to_pylist()
+            m = len(ev)
+
             for i in range(m):
-                ts = int(rows["event_time"].iloc[i])
-                sec = ts // 1000
+                sec = int(ev[i].as_py()) // 1000
 
                 if sec != current_sec and bucket_rows:
-                    # Build book for the completed second
                     recon.clear()
                     for r in bucket_rows:
                         recon.apply(side=r["side"], price=r["price"], quantity=r["quantity"])
@@ -115,9 +117,9 @@ def _build_book_snapshots_multi(
 
                 current_sec = sec
                 bucket_rows.append({
-                    "side": str(rows["side"].iloc[i]),
-                    "price": float(rows["price"].iloc[i]),
-                    "quantity": float(rows["quantity"].iloc[i]),
+                    "side": sd[i],
+                    "price": float(px[i]),
+                    "quantity": float(qt[i]),
                 })
 
             day_rows += m
