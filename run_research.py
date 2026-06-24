@@ -62,49 +62,36 @@ def _prepare_liq(df: pd.DataFrame) -> pd.DataFrame:
     return out[["timestamp_ms", "side", "price", "size"]]
 
 
-def _build_book_snapshots(date_str: str) -> dict[int, tuple[list, list]]:
+def _build_book_snapshots(book_raw: pd.DataFrame) -> dict[int, tuple[list, list]]:
     """
-    Download orderbook in hourly chunks, building snapshots incrementally.
-    Each hourly chunk (~1.2M rows) is processed and discarded before the next.
+    ONE streaming pass over book_raw: apply 28M deltas → 1-second snapshots.
+    Uses numpy arrays for speed; no itertuples overhead.
     """
-    print("  Building 1s book snapshots (hourly chunks) …", flush=True)
+    print("  Building 1s book snapshots …", flush=True)
+    ev = book_raw["event_time"].values.astype("int64")
+    tp = book_raw["event_type"].values
+    sd = book_raw["side"].values
+    px = book_raw["price"].values.astype(float)
+    qt = book_raw["quantity"].values.astype(float)
+    n = len(ev)
+
     recon = OrderBookReconstructor()
     snapshots: dict[int, tuple[list, list]] = {}
     current_bucket_ms = -1
 
-    for hour in range(24):
-        with chd.CryptoHFTDataClient(api_key=API_KEY, max_workers=1) as client:
-            chunk = client.get_orderbook(
-                symbol=SYMBOL, exchange=EXCHANGE,
-                start_date=date_str, end_date=date_str,
-                start_hour=hour, end_hour=hour,
-            )
-        if chunk.empty:
-            continue
-
-        ev = chunk["event_time"].values.astype("int64")
-        tp = chunk["event_type"].values
-        sd = chunk["side"].values
-        px = chunk["price"].values.astype(float)
-        qt = chunk["quantity"].values.astype(float)
-        n = len(ev)
-
-        for i in range(n):
-            ts = int(ev[i])
-            bucket = ts // 1000
-            if bucket != current_bucket_ms and current_bucket_ms != -1:
-                snapshots[current_bucket_ms * 1000] = recon.top_n(20)
-            current_bucket_ms = bucket
-            if tp[i] == "snapshot":
-                recon.clear()
-            recon.apply(side=str(sd[i]), price=float(px[i]), quantity=float(qt[i]))
-
-        print(f"    Hour {hour:02d}: {n:,} rows — {len(snapshots):,} snapshots so far", flush=True)
+    for i in range(n):
+        bucket = int(ev[i]) // 1000
+        if bucket != current_bucket_ms and current_bucket_ms != -1:
+            snapshots[current_bucket_ms * 1000] = recon.top_n(20)
+        current_bucket_ms = bucket
+        if tp[i] == "snapshot":
+            recon.clear()
+        recon.apply(side=str(sd[i]), price=float(px[i]), quantity=float(qt[i]))
 
     if current_bucket_ms != -1:
         snapshots[current_bucket_ms * 1000] = recon.top_n(20)
 
-    print(f"  {len(snapshots):,} snapshots total.", flush=True)
+    print(f"  {len(snapshots):,} snapshots built.", flush=True)
     return snapshots
 
 
@@ -132,8 +119,14 @@ def main(date_str: str) -> None:
     del trades_raw
     trades_df = trades_df.sort_values("timestamp_ms").reset_index(drop=True)
 
-    # Build snapshots (downloads hourly chunks internally, incremental processing)
-    book_snapshots = _build_book_snapshots(date_str)
+    print("  Downloading orderbook …", flush=True)
+    with chd.CryptoHFTDataClient(api_key=API_KEY, max_workers=1) as client:
+        book_raw = client.get_orderbook(symbol=SYMBOL, exchange=EXCHANGE,
+                                        start_date=date_str, end_date=date_str)
+    print(f"  Book deltas: {len(book_raw):,} rows")
+
+    book_snapshots = _build_book_snapshots(book_raw)
+    del book_raw
 
     print("  Downloading liquidations …", flush=True)
     with chd.CryptoHFTDataClient(api_key=API_KEY, max_workers=1) as client:
