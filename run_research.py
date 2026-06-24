@@ -71,7 +71,6 @@ def _build_book_snapshots_multi(
 
     recon = OrderBookReconstructor()
     snapshots: dict[int, tuple[list, list]] = {}
-    current_bucket_ms = -1
     total_rows = 0
 
     d = start
@@ -90,37 +89,52 @@ def _build_book_snapshots_multi(
             print(f"    [debug] event_type values: {df['event_type'].value_counts().to_dict()}")
         day_idx += 1
 
-        # Process in chunks to limit memory (~500K rows at a time)
+        # Process in chunks: group by second, build book per-second, discard.
         import pyarrow.parquet as pq
         pf = pq.ParquetFile(fpath)
         day_rows = 0
+        bucket_rows: list[dict] = []
+        current_sec = -1
+
         for batch in pf.iter_batches(batch_size=500_000):
             rows = batch.to_pandas()
-            ev = rows["event_time"].values.astype("int64")
-            tp = rows["event_type"].values
-            sd = rows["side"].values
-            px = rows["price"].values.astype(float)
-            qt = rows["quantity"].values.astype(float)
-            m = len(ev)
-
+            m = len(rows)
             for i in range(m):
-                bucket = int(ev[i]) // 1000
-                if bucket != current_bucket_ms and current_bucket_ms != -1:
-                    snapshots[current_bucket_ms * 1000] = recon.top_n(20)
-                current_bucket_ms = bucket
-                if tp[i] == "snapshot":
+                ts = int(rows["event_time"].iloc[i])
+                sec = ts // 1000
+
+                if sec != current_sec and bucket_rows:
+                    # Build book for the completed second
                     recon.clear()
-                recon.apply(side=str(sd[i]), price=float(px[i]), quantity=float(qt[i]))
+                    for r in bucket_rows:
+                        recon.apply(side=r["side"], price=r["price"], quantity=r["quantity"])
+                    key = current_sec * 1000
+                    if key not in snapshots:
+                        snapshots[key] = recon.top_n(20)
+                    bucket_rows.clear()
+
+                current_sec = sec
+                bucket_rows.append({
+                    "side": str(rows["side"].iloc[i]),
+                    "price": float(rows["price"].iloc[i]),
+                    "quantity": float(rows["quantity"].iloc[i]),
+                })
 
             day_rows += m
+
+        # Final second
+        if bucket_rows:
+            recon.clear()
+            for r in bucket_rows:
+                recon.apply(side=r["side"], price=r["price"], quantity=r["quantity"])
+            key = current_sec * 1000
+            if key not in snapshots:
+                snapshots[key] = recon.top_n(20)
 
         total_rows += day_rows
         print(f"    {date_str}: {day_rows:,} rows → {len(snapshots):,} snapshots",
               flush=True)
         d += timedelta(days=1)
-
-    if current_bucket_ms != -1:
-        snapshots[current_bucket_ms * 1000] = recon.top_n(20)
 
     print(f"  Total: {total_rows:,} book rows → {len(snapshots):,} snapshots",
           flush=True)
