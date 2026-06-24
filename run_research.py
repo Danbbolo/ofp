@@ -1,23 +1,24 @@
 """
-run_research.py — Fetch 1 day of BTCUSDT data and run a full grid sweep.
+run_research.py — Multi-day grid sweep from local parquet files.
 
-- ONE datatype conversion pass at the start.
-- Pre-builds 1-second book snapshots into a dict (ms-keyed).
-- GridSweeper does binary-search slicing only.
+Reads raw data from ``data/raw/YYYY-MM-DD/``, builds book snapshots
+incrementally across days, sweeps all days in one continuous pass.
 
 Usage::
 
-    python run_research.py 2026-06-23
+    python run_research.py 2026-06-01 2026-06-30
 
 Output: ``data/research_dataset.parquet``
 """
 
 from __future__ import annotations
 
+import gc
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
-import cryptohftdata as chd
+import numpy as np
 import pandas as pd
 
 from ofp.book_reconstructor import OrderBookReconstructor
@@ -27,23 +28,20 @@ from ofp.grid_sweeper import GridSweeper
 # Configuration
 # ---------------------------------------------------------------------------
 
-API_KEY = "2845d16a0479fc66dc89c01eccc8a3d3434e199828de1c8f168dacfca4a0e0ec"
-EXCHANGE = chd.exchanges.BINANCE_SPOT
-SYMBOL = "BTCUSDT"
+RAW_DIR = Path("data/raw")
+OUTPUT_DIR = Path("data")
+OUTPUT_FILE = OUTPUT_DIR / "research_dataset.parquet"
 
 WINDOW_SIZES_SEC = [60, 120, 180, 300, 600]
 HORIZONS_SEC = [300, 900, 1800, 3600, 14400]
-OUTPUT_DIR = Path("data")
-OUTPUT_FILE = OUTPUT_DIR / "research_dataset.parquet"
 PROGRESS_EVERY = 10_000
 
 
 # ---------------------------------------------------------------------------
-# Pre-conversion helpers  (ONE pass, string→float/int64)
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _prepare_trades(df: pd.DataFrame) -> pd.DataFrame:
-    """trade_time (ms) → timestamp_ms.  price/quantity str → float."""
     out = df.rename(columns={"trade_time": "timestamp_ms", "quantity": "size"})
     out["timestamp_ms"] = out["timestamp_ms"].astype("int64")
     out["price"] = out["price"].astype(float)
@@ -52,7 +50,6 @@ def _prepare_trades(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _prepare_liq(df: pd.DataFrame) -> pd.DataFrame:
-    """timestamp → timestamp_ms.  quantity → size.  price str → float."""
     if df.empty or len(df.columns) == 0:
         return pd.DataFrame(columns=["timestamp_ms", "side", "price", "size"])
     out = df.rename(columns={"timestamp": "timestamp_ms", "quantity": "size"})
@@ -62,80 +59,128 @@ def _prepare_liq(df: pd.DataFrame) -> pd.DataFrame:
     return out[["timestamp_ms", "side", "price", "size"]]
 
 
-def _build_book_snapshots(book_raw: pd.DataFrame) -> dict[int, tuple[list, list]]:
+def _build_book_snapshots_multi(
+    start_str: str, end_str: str,
+) -> dict[int, tuple[list, list]]:
     """
-    ONE streaming pass over book_raw: apply 28M deltas → 1-second snapshots.
-    Uses numpy arrays for speed; no itertuples overhead.
+    Build 1-second book snapshots incrementally across multiple days.
+    OrderBookReconstructor state persists across day boundaries.
     """
-    print("  Building 1s book snapshots …", flush=True)
-    ev = book_raw["event_time"].values.astype("int64")
-    tp = book_raw["event_type"].values
-    sd = book_raw["side"].values
-    px = book_raw["price"].values.astype(float)
-    qt = book_raw["quantity"].values.astype(float)
-    n = len(ev)
+    start = datetime.strptime(start_str, "%Y-%m-%d")
+    end = datetime.strptime(end_str, "%Y-%m-%d")
 
     recon = OrderBookReconstructor()
     snapshots: dict[int, tuple[list, list]] = {}
     current_bucket_ms = -1
+    total_rows = 0
 
-    for i in range(n):
-        bucket = int(ev[i]) // 1000
-        if bucket != current_bucket_ms and current_bucket_ms != -1:
-            snapshots[current_bucket_ms * 1000] = recon.top_n(20)
-        current_bucket_ms = bucket
-        if tp[i] == "snapshot":
-            recon.clear()
-        recon.apply(side=str(sd[i]), price=float(px[i]), quantity=float(qt[i]))
+    d = start
+    while d <= end:
+        date_str = d.strftime("%Y-%m-%d")
+        fpath = RAW_DIR / date_str / "book.parquet"
+        if not fpath.exists():
+            print(f"    {date_str}: no book file, skipping", flush=True)
+            d += timedelta(days=1)
+            continue
+
+        df = pd.read_parquet(fpath)
+        ev = df["event_time"].values.astype("int64")
+        tp = df["event_type"].values
+        sd = df["side"].values
+        px = df["price"].values.astype(float)
+        qt = df["quantity"].values.astype(float)
+        n = len(ev)
+
+        for i in range(n):
+            bucket = int(ev[i]) // 1000
+            if bucket != current_bucket_ms and current_bucket_ms != -1:
+                snapshots[current_bucket_ms * 1000] = recon.top_n(20)
+            current_bucket_ms = bucket
+            if tp[i] == "snapshot":
+                recon.clear()
+            recon.apply(side=str(sd[i]), price=float(px[i]), quantity=float(qt[i]))
+
+        total_rows += n
+        print(f"    {date_str}: {n:,} rows → {len(snapshots):,} snapshots",
+              flush=True)
+        d += timedelta(days=1)
 
     if current_bucket_ms != -1:
         snapshots[current_bucket_ms * 1000] = recon.top_n(20)
 
-    print(f"  {len(snapshots):,} snapshots built.", flush=True)
+    print(f"  Total: {total_rows:,} book rows → {len(snapshots):,} snapshots",
+          flush=True)
     return snapshots
+
+
+def _load_trades_multi(start_str: str, end_str: str) -> pd.DataFrame:
+    """Load and concatenate trades from all days."""
+    start = datetime.strptime(start_str, "%Y-%m-%d")
+    end = datetime.strptime(end_str, "%Y-%m-%d")
+    chunks = []
+
+    d = start
+    while d <= end:
+        date_str = d.strftime("%Y-%m-%d")
+        fpath = RAW_DIR / date_str / "trades.parquet"
+        if fpath.exists():
+            df = _prepare_trades(pd.read_parquet(fpath))
+            chunks.append(df)
+        d += timedelta(days=1)
+
+    result = pd.concat(chunks, ignore_index=True)
+    result = result.sort_values("timestamp_ms").reset_index(drop=True)
+    return result
+
+
+def _load_liq_multi(start_str: str, end_str: str) -> pd.DataFrame:
+    """Load and concatenate liquidations from all days."""
+    start = datetime.strptime(start_str, "%Y-%m-%d")
+    end = datetime.strptime(end_str, "%Y-%m-%d")
+    chunks = []
+
+    d = start
+    while d <= end:
+        date_str = d.strftime("%Y-%m-%d")
+        fpath = RAW_DIR / date_str / "liq.parquet"
+        if fpath.exists():
+            df = _prepare_liq(pd.read_parquet(fpath))
+            if not df.empty:
+                chunks.append(df)
+        d += timedelta(days=1)
+
+    if not chunks:
+        return pd.DataFrame(columns=["timestamp_ms", "side", "price", "size"])
+    result = pd.concat(chunks, ignore_index=True)
+    result = result.sort_values("timestamp_ms").reset_index(drop=True)
+    return result
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-def main(date_str: str) -> None:
-    print(f"Fetching {SYMBOL} data for {date_str} …")
+def main(start_str: str, end_str: str) -> None:
+    print(f"Multi-day sweep: {start_str} → {end_str}")
     print(f"  Windows: {WINDOW_SIZES_SEC}")
     print(f"  Horizons: {HORIZONS_SEC}")
 
-    # --- Fetch sequentially (not parallel) to keep memory low ---
-    print("  Downloading trades …", flush=True)
-    with chd.CryptoHFTDataClient(api_key=API_KEY, max_workers=1) as client:
-        trades_raw = client.get_trades(symbol=SYMBOL, exchange=EXCHANGE,
-                                       start_date=date_str, end_date=date_str)
-    print(f"  Trades: {len(trades_raw):,} rows")
-    if trades_raw.empty:
-        print("ERROR: No trade data fetched.")
+    # --- Load trades ---
+    print("Loading trades …", flush=True)
+    trades_df = _load_trades_multi(start_str, end_str)
+    print(f"  Trades: {len(trades_df):,} rows")
+    if trades_df.empty:
+        print("ERROR: No trade data found.")
         sys.exit(1)
 
-    # Convert + free raw immediately
-    trades_df = _prepare_trades(trades_raw)
-    del trades_raw
-    trades_df = trades_df.sort_values("timestamp_ms").reset_index(drop=True)
+    # --- Load liquidations ---
+    print("Loading liquidations …", flush=True)
+    liq_df = _load_liq_multi(start_str, end_str)
+    print(f"  Liquidations: {len(liq_df):,} rows")
 
-    print("  Downloading orderbook …", flush=True)
-    with chd.CryptoHFTDataClient(api_key=API_KEY, max_workers=1) as client:
-        book_raw = client.get_orderbook(symbol=SYMBOL, exchange=EXCHANGE,
-                                        start_date=date_str, end_date=date_str)
-    print(f"  Book deltas: {len(book_raw):,} rows")
-
-    book_snapshots = _build_book_snapshots(book_raw)
-    del book_raw
-
-    print("  Downloading liquidations …", flush=True)
-    with chd.CryptoHFTDataClient(api_key=API_KEY, max_workers=1) as client:
-        liq_raw = client.get_liquidations(symbol=SYMBOL, exchange=EXCHANGE,
-                                          start_date=date_str, end_date=date_str)
-    print(f"  Liquidations: {len(liq_raw):,} rows")
-    liq_df = _prepare_liq(liq_raw)
-    del liq_raw
-    liq_df = liq_df.sort_values("timestamp_ms").reset_index(drop=True)
+    # --- Build book snapshots incrementally ---
+    print("Building book snapshots …", flush=True)
+    book_snapshots = _build_book_snapshots_multi(start_str, end_str)
 
     # --- Compute globals ---
     rolling_avg_volume = float(trades_df["size"].sum() / max(len(trades_df), 1))
@@ -145,7 +190,7 @@ def main(date_str: str) -> None:
         "_24h_high": float(trades_df["price"].max()),
     }
     print(f"  Rolling avg volume: {rolling_avg_volume:.4f}")
-    print(f"  24h range: {_24h_stats['_24h_low']:.2f} – {_24h_stats['_24h_high']:.2f}")
+    print(f"  Range: {_24h_stats['_24h_low']:.2f} – {_24h_stats['_24h_high']:.2f}")
     print("  Sweeping …", flush=True)
 
     # --- Sweep ---
@@ -177,13 +222,12 @@ def main(date_str: str) -> None:
     print(f"  File:  {OUTPUT_FILE.resolve()}")
     print(f"  Size:  {size_mb:.2f} MB")
     print(f"  Rows:  {len(result):,}")
-    print(f"  Cols:  {list(result.columns)}")
     print()
-    print(result.head(5))
+    print(result.head(3))
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print(f"Usage: python {sys.argv[0]} YYYY-MM-DD")
+    if len(sys.argv) != 3:
+        print(f"Usage: python {sys.argv[0]} YYYY-MM-DD YYYY-MM-DD")
         sys.exit(1)
-    main(sys.argv[1])
+    main(sys.argv[1], sys.argv[2])
