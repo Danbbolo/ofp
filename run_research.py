@@ -73,7 +73,7 @@ def _build_book_snapshots(date_str: str) -> dict[int, tuple[list, list]]:
     current_bucket_ms = -1
 
     for hour in range(24):
-        with chd.CryptoHFTDataClient(api_key=API_KEY) as client:
+        with chd.CryptoHFTDataClient(api_key=API_KEY, max_workers=1) as client:
             chunk = client.get_orderbook(
                 symbol=SYMBOL, exchange=EXCHANGE,
                 start_date=date_str, end_date=date_str,
