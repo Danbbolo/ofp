@@ -127,6 +127,8 @@ def _build_book_snapshots_multi(
         total_rows += day_rows
         print(f"    {date_str}: {day_rows:,} rows → {len(snapshots):,} snapshots",
               flush=True)
+        # Free per-day memory (per spec section 7)
+        gc.collect()
         d += timedelta(days=1)
 
     print(f"  Total: {total_rows:,} book rows → {len(snapshots):,} snapshots",

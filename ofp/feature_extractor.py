@@ -306,9 +306,9 @@ def extract_multi_zoom_features(
     rolling_stats_per_zoom : dict
         ``{"micro": {...}, "meso": {...}, "macro": {...}}`` — each holds
         ``rolling_avg_volume`` (typical volume in a window of that zoom's
-        size), plus optional ``_24h_avg_range`` / ``_24h_low`` / ``_24h_high``.
-        Each zoom MUST get its own baseline — passing a single global
-        value across zooms is a context leak.
+        size).  ``_24h_low`` / ``_24h_high`` / ``_24h_avg_range`` are
+        computed LOCALLY per zoom from the prior 24h of trades (not a
+        single global value — that would be a context leak).
     current_price : float
         Forwarded to every zoom (it's the same trade timestamp).
 
@@ -344,6 +344,21 @@ def extract_multi_zoom_features(
     liq_sz = liq_df["size"].values if len(liq_df) > 0 else None
 
     zooms = [("micro", micro_window_ms), ("meso", meso_window_ms), ("macro", macro_window_ms)]
+    DAY_MS = 24 * 3_600_000  # 86_400_000
+
+    def _prior_24h_stats(lookback_end_ms: int) -> tuple[float, float, float]:
+        """Return (low, high, avg_range) over [lookback_end_ms - 24h, lookback_end_ms)."""
+        lo_ms = lookback_end_ms - DAY_MS
+        i_lo = int(np.searchsorted(trade_ts, lo_ms, side="left"))
+        i_hi = int(np.searchsorted(trade_ts, lookback_end_ms, side="left"))
+        if i_hi <= i_lo:
+            return 0.0, 0.0, 0.0
+        px = trade_px[i_lo:i_hi]
+        if len(px) == 0:
+            return 0.0, 0.0, 0.0
+        lo_p = float(px.min())
+        hi_p = float(px.max())
+        return lo_p, hi_p, hi_p - lo_p
 
     for prefix, window_ms in zooms:
         win_start = end_time_ms - window_ms
@@ -373,6 +388,12 @@ def extract_multi_zoom_features(
         # Per-zoom rolling stats — this is the fix for the context leak
         rs = rolling_stats_per_zoom.get(prefix, {})
 
+        # Per-zoom prior-24h context — computed locally from the trades
+        # array, NOT a single global value.  Without this, vol_ratio and
+        # price_position are the same number across all 3 zooms, which
+        # is a context leak (caught by verify_dataset).
+        d24_low, d24_high, d24_range = _prior_24h_stats(end_time_ms)
+
         feats = extract_features(
             trades_df=sliced_trades,
             book_snapshot_start=_book_at(win_start),
@@ -382,9 +403,9 @@ def extract_multi_zoom_features(
             window_end_ms=end_time_ms,
             rolling_avg_volume=rs.get("rolling_avg_volume", 0.0),
             current_price=current_price,
-            _24h_avg_range=rs.get("_24h_avg_range", 0.0),
-            _24h_low=rs.get("_24h_low", 0.0),
-            _24h_high=rs.get("_24h_high", 0.0),
+            _24h_avg_range=d24_range if d24_range > 0 else rs.get("_24h_avg_range", 0.0),
+            _24h_low=d24_low if d24_low > 0 else rs.get("_24h_low", 0.0),
+            _24h_high=d24_high if d24_high > 0 else rs.get("_24h_high", 0.0),
         )
         for k, v in feats.items():
             result[f"{prefix}_{k}"] = v

@@ -143,6 +143,7 @@ class GridSweeper:
         chunk_size : int
             Rows per write batch.
         """
+        import gc
         writer: pq.ParquetWriter | None = None
         buffer: list[dict[str, Any]] = []
 
@@ -154,6 +155,7 @@ class GridSweeper:
                     writer = pq.ParquetWriter(filepath, batch.schema)
                 writer.write_batch(batch)
                 buffer.clear()
+                gc.collect()  # free memory before next chunk (per spec)
 
         # Flush remainder
         if buffer:
