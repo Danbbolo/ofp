@@ -297,6 +297,7 @@ def extract_multi_zoom_features(
     end_time_ms: int,
     rolling_stats_per_zoom: dict[str, dict[str, float]] | None = None,
     current_price: float = 0.0,
+    prior_24h_cache: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
 ) -> dict[str, float]:
     """
     Extract features at 3 zoom levels sharing the same *end_time_ms*.
@@ -311,6 +312,11 @@ def extract_multi_zoom_features(
         single global value — that would be a context leak).
     current_price : float
         Forwarded to every zoom (it's the same trade timestamp).
+    prior_24h_cache : (sec_arr, low_arr, high_arr) | None
+        Pre-computed per-second prior-24h stats.  Build this ONCE per
+        sweep (not per row) — building it per row is O(n²) and
+        kills performance.  If None, this function builds the cache
+        itself (slow on large datasets; only used for unit tests).
 
     Returns
     -------
@@ -353,11 +359,17 @@ def extract_multi_zoom_features(
     # min/max scan per row is O(n²) over the whole sweep.  Instead we
     # build a cached lookup using a monotonic deque over per-second
     # price min/max, in O(n) total.
+    #
+    # IMPORTANT: if `prior_24h_cache` is passed in (the normal case
+    # from `GridSweeper.sweep`), use it as-is.  Building per call is
+    # O(n) and turns the sweep into O(n²).
     # ----------------------------------------------------------------
-    if len(trade_ts) == 0:
+    if prior_24h_cache is not None:
+        d24_sec_arr, d24_low_arr, d24_high_arr = prior_24h_cache
+    elif len(trade_ts) == 0:
+        d24_sec_arr = np.zeros(1, dtype=np.int64)
         d24_low_arr = np.zeros(1, dtype=np.float64)
         d24_high_arr = np.zeros(1, dtype=np.float64)
-        d24_sec_arr = np.zeros(1, dtype=np.int64)
     else:
         # Bucket trades by their ms-timestamp floored to 1 second
         sec_ts = trade_ts // 1000
@@ -397,9 +409,9 @@ def extract_multi_zoom_features(
             d24_low[hi] = sec_min[min_q[0]]
             d24_high[hi] = sec_max[max_q[0]]
 
+        d24_sec_arr = unique_secs
         d24_low_arr = d24_low
         d24_high_arr = d24_high
-        d24_sec_arr = unique_secs
 
     def _prior_24h_stats(lookback_end_ms: int) -> tuple[float, float, float]:
         """Return (low, high, range) for the 24h before lookback_end_ms."""

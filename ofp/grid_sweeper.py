@@ -67,6 +67,49 @@ class GridSweeper:
         trade_ts = trades["timestamp_ms"].values
         trade_px = trades["price"].values
 
+        # ----------------------------------------------------------------
+        # Build the prior-24h cache ONCE per sweep.  This is the same
+        # 24h min/max that extract_multi_zoom_features would otherwise
+        # recompute per row — making the sweep O(n²) and slow.
+        # ----------------------------------------------------------------
+        from collections import deque
+        if len(trade_ts) == 0:
+            d24_sec = np.zeros(1, dtype=np.int64)
+            d24_low = np.zeros(1, dtype=np.float64)
+            d24_high = np.zeros(1, dtype=np.float64)
+        else:
+            sec_ts = trade_ts // 1000
+            unique_secs, inv = np.unique(sec_ts, return_inverse=True)
+            n_secs = len(unique_secs)
+            sec_min = np.full(n_secs, np.inf)
+            sec_max = np.full(n_secs, -np.inf)
+            np.minimum.at(sec_min, inv, trade_px)
+            np.maximum.at(sec_max, inv, trade_px)
+
+            day_secs = 86_400
+            d24_low = np.empty(n_secs, dtype=np.float64)
+            d24_high = np.empty(n_secs, dtype=np.float64)
+            min_q: deque = deque()
+            max_q: deque = deque()
+            lo = 0
+            for hi in range(n_secs):
+                while min_q and sec_min[min_q[-1]] >= sec_min[hi]:
+                    min_q.pop()
+                min_q.append(hi)
+                while max_q and sec_max[max_q[-1]] <= sec_max[hi]:
+                    max_q.pop()
+                max_q.append(hi)
+                while unique_secs[hi] - unique_secs[lo] >= day_secs:
+                    lo += 1
+                    if min_q[0] < lo:
+                        min_q.popleft()
+                    if max_q[0] < lo:
+                        max_q.popleft()
+                d24_low[hi] = sec_min[min_q[0]]
+                d24_high[hi] = sec_max[max_q[0]]
+            d24_sec = unique_secs
+        prior_24h_cache = (d24_sec, d24_low, d24_high)
+
         def _price_at(target_ms: int) -> float | None:
             idx = int(np.searchsorted(trade_ts, target_ms, side="left"))
             if idx >= len(trade_ts):
@@ -105,6 +148,7 @@ class GridSweeper:
                         end_time_ms=win_end,
                         rolling_stats_per_zoom=rolling_stats_per_zoom,
                         current_price=current_px,
+                        prior_24h_cache=prior_24h_cache,
                     )
 
                     outcome_pct = (future_px - current_px) / current_px
