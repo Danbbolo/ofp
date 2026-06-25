@@ -344,21 +344,74 @@ def extract_multi_zoom_features(
     liq_sz = liq_df["size"].values if len(liq_df) > 0 else None
 
     zooms = [("micro", micro_window_ms), ("meso", meso_window_ms), ("macro", macro_window_ms)]
-    DAY_MS = 24 * 3_600_000  # 86_400_000
+
+    # ----------------------------------------------------------------
+    # Pre-compute prior-24h rolling low/high/range ONCE per second.
+    # ----------------------------------------------------------------
+    # The prior 24h range for an arbitrary end_time_ms requires a slice
+    # over the full prior 24h of trades (~3M trades).  Doing that
+    # min/max scan per row is O(n²) over the whole sweep.  Instead we
+    # build a cached lookup using a monotonic deque over per-second
+    # price min/max, in O(n) total.
+    # ----------------------------------------------------------------
+    if len(trade_ts) == 0:
+        d24_low_arr = np.zeros(1, dtype=np.float64)
+        d24_high_arr = np.zeros(1, dtype=np.float64)
+        d24_sec_arr = np.zeros(1, dtype=np.int64)
+    else:
+        # Bucket trades by their ms-timestamp floored to 1 second
+        sec_ts = trade_ts // 1000
+        unique_secs, inv = np.unique(sec_ts, return_inverse=True)
+        n_secs = len(unique_secs)
+
+        # Per-second min/max price
+        sec_min = np.full(n_secs, np.inf)
+        sec_max = np.full(n_secs, -np.inf)
+        np.minimum.at(sec_min, inv, trade_px)
+        np.maximum.at(sec_max, inv, trade_px)
+
+        # Sliding-window 24h min/max using monotonic deques — O(n) total
+        from collections import deque
+        day_secs = 86_400
+        d24_low = np.empty(n_secs, dtype=np.float64)
+        d24_high = np.empty(n_secs, dtype=np.float64)
+        min_q: deque[int] = deque()  # indices with strictly increasing sec_min
+        max_q: deque[int] = deque()  # indices with strictly decreasing sec_max
+        lo = 0
+        for hi in range(n_secs):
+            # Push hi onto min deque: pop while back has >= sec_min[hi]
+            while min_q and sec_min[min_q[-1]] >= sec_min[hi]:
+                min_q.pop()
+            min_q.append(hi)
+            # Push hi onto max deque: pop while back has <= sec_max[hi]
+            while max_q and sec_max[max_q[-1]] <= sec_max[hi]:
+                max_q.pop()
+            max_q.append(hi)
+            # Advance lo while the window is wider than 24h
+            while unique_secs[hi] - unique_secs[lo] >= day_secs:
+                lo += 1
+                if min_q[0] < lo:
+                    min_q.popleft()
+                if max_q[0] < lo:
+                    max_q.popleft()
+            d24_low[hi] = sec_min[min_q[0]]
+            d24_high[hi] = sec_max[max_q[0]]
+
+        d24_low_arr = d24_low
+        d24_high_arr = d24_high
+        d24_sec_arr = unique_secs
 
     def _prior_24h_stats(lookback_end_ms: int) -> tuple[float, float, float]:
-        """Return (low, high, avg_range) over [lookback_end_ms - 24h, lookback_end_ms)."""
-        lo_ms = lookback_end_ms - DAY_MS
-        i_lo = int(np.searchsorted(trade_ts, lo_ms, side="left"))
-        i_hi = int(np.searchsorted(trade_ts, lookback_end_ms, side="left"))
-        if i_hi <= i_lo:
+        """Return (low, high, range) for the 24h before lookback_end_ms."""
+        lookback_sec = lookback_end_ms // 1000
+        idx = int(np.searchsorted(d24_sec_arr, lookback_sec, side="right")) - 1
+        if idx < 0 or idx >= len(d24_sec_arr):
             return 0.0, 0.0, 0.0
-        px = trade_px[i_lo:i_hi]
-        if len(px) == 0:
+        lo = float(d24_low_arr[idx])
+        hi = float(d24_high_arr[idx])
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= 0 or lo <= 0:
             return 0.0, 0.0, 0.0
-        lo_p = float(px.min())
-        hi_p = float(px.max())
-        return lo_p, hi_p, hi_p - lo_p
+        return lo, hi, hi - lo
 
     for prefix, window_ms in zooms:
         win_start = end_time_ms - window_ms
