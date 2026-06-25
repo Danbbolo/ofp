@@ -1,8 +1,8 @@
 """
-feature_extractor.py — Extract 28 features from a trading window.
+feature_extractor.py - Extract 36 features from a trading window.
 
 Consumes validated trades, L2 book snapshots, and liquidation DataFrames.
-No models, no indicators — just deterministic feature arithmetic.
+No models, no indicators - just deterministic feature arithmetic.
 """
 
 from __future__ import annotations
@@ -29,14 +29,14 @@ def extract_features(
     current_price: float = 0.0,
 ) -> dict[str, float]:
     """
-    Extract exactly 28 features from one time window.
+    Extract exactly 36 features from one time window.
 
     Parameters
     ----------
     trades_df : DataFrame
         Columns: ``timestamp_ms``, ``price``, ``size``, ``is_buyer_maker``.
     book_snapshot_start : (bids, asks)
-        Each is ``[(price, size), ...]`` — top-20 book at window start.
+        Each is ``[(price, size), ...]`` - top-20 book at window start.
     book_snapshot_end : (bids, asks)
         Top-20 book at window end.
     liq_df : DataFrame
@@ -46,12 +46,12 @@ def extract_features(
     rolling_avg_volume : float
         Average volume over a larger lookback for normalisation.
     _24h_avg_range, _24h_low, _24h_high, current_price : float
-        Contextual 24h stats (default 0.0 — pass real values when available).
+        Contextual 24h stats (default 0.0; pass real values when available).
 
     Returns
     -------
     dict[str, float]
-        28 keys: ``buy_volume`` through ``trend_slope``.
+        36 keys: ``buy_volume`` through ``volume_profile_entropy``.
         Groups B (book) and C (liquidation) are reserved at 0.0.
     """
     # ------------------------------------------------------------------
@@ -74,7 +74,7 @@ def extract_features(
     sell_mask = trade_bm
 
     # ------------------------------------------------------------------
-    # Group A — The Attack (Market Trades)  [keys  1–12]
+    # Group A - The Attack (Market Trades)  [keys  1-12]
     # ------------------------------------------------------------------
 
     # 1. buy_volume
@@ -111,7 +111,7 @@ def extract_features(
     else:
         acceleration = 0.0
 
-    # 8–12.  Delta curve  (cumulative net volume at 20/40/60/80/100 % marks)
+    # 8-12.  Delta curve  (cumulative net volume at 20/40/60/80/100 % marks)
     window_dur = window_end_ms - window_start_ms
 
     if n_trades > 0 and window_dur > 0:
@@ -140,7 +140,7 @@ def extract_features(
         delta_1 = delta_2 = delta_3 = delta_4 = delta_5 = 0.0
 
     # ------------------------------------------------------------------
-    # Group B — The Defence (Book Depth)     [keys 13–20]
+    # Group B - The Defence (Book Depth)     [keys 13-20]
     # ------------------------------------------------------------------
     bids_end, asks_end = book_snapshot_end
     bids_start, asks_start = book_snapshot_start
@@ -170,7 +170,7 @@ def extract_features(
     book_depth_slope = _depth_slope(bids_end, asks_end, n=5)
 
     # ------------------------------------------------------------------
-    # Group C — The Forced Errors (Liquidations)  [keys 21–25]
+    # Group C - The Forced Errors (Liquidations)  [keys 21-25]
     # (liq_df is assumed pre-sliced by the caller)
     # ------------------------------------------------------------------
     liq_win = liq_df
@@ -199,10 +199,10 @@ def extract_features(
         liq_timing = 0.0
 
     # ------------------------------------------------------------------
-    # Group D — Context                      [keys 26–30]
+    # Group D - Context                      [keys 26-30]
     # ------------------------------------------------------------------
 
-    # 26–27.  Hour cyclicals
+    # 26-27.  Hour cyclicals
     hour = (window_end_ms // 3_600_000) % 24
     hour_sin = math.sin(2.0 * math.pi * hour / 24.0)
     hour_cos = math.cos(2.0 * math.pi * hour / 24.0)
@@ -243,10 +243,127 @@ def extract_features(
         trend_slope = 0.0
 
     # ------------------------------------------------------------------
-    # Assemble exactly 30 keys
+    # Group E - Advanced Orderflow  [keys 31-36]
+    # ------------------------------------------------------------------
+    # 31.  cvd - Cumulative Volume Delta
+    # Running sum of signed_size (buy_vol - sell_vol) across the window.
+    # Positive = net buying pressure across the window.
+    if n_trades > 0:
+        cvd = float(signed_size.sum())
+    else:
+        cvd = 0.0
+
+    # 32.  cvd_momentum - slope of CVD in 2nd half vs 1st half
+    # Positive = flow is accelerating upward. Negative = flow drying up.
+    if n_trades > 0 and window_dur > 0:
+        mid_ms = window_start_ms + (window_end_ms - window_start_ms) / 2.0
+        first_half_cvd = float(signed_size[trade_ts < mid_ms].sum())
+        second_half_cvd = float(signed_size[trade_ts >= mid_ms].sum())
+        # Normalize by total window volume so it's scale-independent
+        cvd_momentum = (second_half_cvd - first_half_cvd) / (total_volume + 1e-9)
+    else:
+        cvd_momentum = 0.0
+
+    # 33.  large_trade_count - whale detection
+    # Count of trades where size > mean + 2*std. Right-tailed trade size
+    # distribution = institutional footprint.
+    if n_trades > 1:
+        mean_size = float(trade_sz.mean())
+        std_size = float(trade_sz.std())
+        threshold = mean_size + 2.0 * std_size
+        large_trade_count = int((trade_sz > threshold).sum())
+    else:
+        large_trade_count = 0
+
+    # 34.  trade_size_skew - skewness of trade size distribution
+    # Positive = right-skewed (few large trades among many small ones).
+    if n_trades > 2:
+        m = float(trade_sz.mean())
+        s = float(trade_sz.std())
+        if s > 0:
+            n_f = float(n_trades)
+            m3 = float(((trade_sz - m) ** 3).mean())
+            trade_size_skew = m3 / (s ** 3) * (n_f * (n_f - 1)) ** 0.5 / (n_f - 2)
+        else:
+            trade_size_skew = 0.0
+    else:
+        trade_size_skew = 0.0
+
+    # 35.  wall_lifecycle - track the largest bid/ask wall over the window.
+    # Categories: 0=no wall, 1=appeared, 2=grew, 3=shrank, 4=cancelled.
+    # We use top-5 book at start vs end. A "wall" is any level with size
+    # >= 2x the median of top-5.
+    def _find_wall(bids, asks):
+        # Return (side, price, size) of largest wall, or (None, 0, 0)
+        if not bids and not asks:
+            return (None, 0.0, 0.0)
+        best = (None, 0.0, 0.0)
+        all_levels = [("bid", p, s) for p, s in bids] + [("ask", p, s) for p, s in asks]
+        if not all_levels:
+            return (None, 0.0, 0.0)
+        sizes = [s for _, _, s in all_levels]
+        med = float(np.median(sizes))
+        if med <= 0:
+            return (None, 0.0, 0.0)
+        for side, p, s in all_levels:
+            if s >= 2.0 * med and s > best[2]:
+                best = (side, p, s)
+        return best
+
+    wall_start = _find_wall(bids_start, asks_start)
+    wall_end = _find_wall(bids_end, asks_end)
+    if wall_start[0] is None and wall_end[0] is None:
+        wall_lifecycle = 0  # no wall in either
+    elif wall_start[0] is None and wall_end[0] is not None:
+        wall_lifecycle = 1  # appeared
+    elif wall_start[0] is not None and wall_end[0] is None:
+        wall_lifecycle = 4  # cancelled
+    else:
+        # both have a wall - check if same price or grew/shrank
+        if wall_start[1] == wall_end[1]:
+            if wall_end[2] > wall_start[2] * 1.1:
+                wall_lifecycle = 2  # grew (>=10% larger)
+            elif wall_end[2] < wall_start[2] * 0.9:
+                wall_lifecycle = 3  # shrank
+            else:
+                wall_lifecycle = 2  # stable - count as grow (it persisted)
+        else:
+            wall_lifecycle = 1  # different level - appeared (and old gone)
+
+    # 36.  volume_profile_entropy - Shannon entropy of volume distribution
+    # across price bins. Low entropy = concentrated = S/R. High entropy = thin.
+    if n_trades > 5 and len(bids_end) > 0 and len(asks_end) > 0:
+        # Build a price range from local min/max
+        pmin = float(trade_px.min())
+        pmax = float(trade_px.max())
+        if pmax > pmin:
+            n_bins = 10
+            edges = np.linspace(pmin, pmax, n_bins + 1)
+            # Volume at each price bin
+            bin_vol = np.zeros(n_bins)
+            for s, p in zip(trade_sz, trade_px):
+                b = int((p - pmin) / (pmax - pmin) * n_bins)
+                b = min(b, n_bins - 1)
+                bin_vol[b] += s
+            total = bin_vol.sum()
+            if total > 0:
+                p = bin_vol / total
+                p = p[p > 0]
+                entropy = float(-np.sum(p * np.log(p + 1e-12)))
+                # Normalize to [0, 1] using log(n_bins) as max
+                volume_profile_entropy = entropy / (np.log(n_bins) + 1e-12)
+            else:
+                volume_profile_entropy = 0.0
+        else:
+            volume_profile_entropy = 0.0
+    else:
+        volume_profile_entropy = 0.0
+
+    # ------------------------------------------------------------------
+    # Assemble exactly 36 keys
     # ------------------------------------------------------------------
     return {
-        # Group A  (1–12)
+        # Group A  (1-12)
         "buy_volume":          buy_volume,
         "sell_volume":         sell_volume,
         "net_volume":          net_volume,
@@ -259,7 +376,7 @@ def extract_features(
         "delta_3":             delta_3,
         "delta_4":             delta_4,
         "delta_5":             delta_5,
-        # Group B  (13–20)
+        # Group B  (13-20)
         "bid_ask_imbalance":   bid_ask_imbalance,
         "bid_wall":            bid_wall,
         "ask_wall":            ask_wall,
@@ -268,18 +385,25 @@ def extract_features(
         "spread_bps":          spread_bps,
         "spread_change":       spread_change,
         "book_depth_slope":    book_depth_slope,
-        # Group C  (21–25)
+        # Group C  (21-25)
         "long_liq_vol":        long_liq_vol,
         "short_liq_vol":       short_liq_vol,
         "net_liq":             net_liq,
         "liq_climax":          liq_climax,
         "liq_timing":           liq_timing,
-        # Group D  (26–30)
+        # Group D  (26-30)
         "hour_sin":            hour_sin,
         "hour_cos":            hour_cos,
         "vol_ratio":           vol_ratio,
         "price_position":      price_position,
         "trend_slope":         trend_slope,
+        # Group E  (31-36) - advanced orderflow
+        "cvd":                  cvd,
+        "cvd_momentum":         cvd_momentum,
+        "large_trade_count":    large_trade_count,
+        "trade_size_skew":      trade_size_skew,
+        "wall_lifecycle":       wall_lifecycle,
+        "volume_profile_entropy": volume_profile_entropy,
     }
 
 
@@ -305,23 +429,23 @@ def extract_multi_zoom_features(
     Parameters
     ----------
     rolling_stats_per_zoom : dict
-        ``{"micro": {...}, "meso": {...}, "macro": {...}}`` — each holds
+        ``{"micro": {...}, "meso": {...}, "macro": {...}}`` - each holds
         ``rolling_avg_volume`` (typical volume in a window of that zoom's
         size).  ``_24h_low`` / ``_24h_high`` / ``_24h_avg_range`` are
         computed LOCALLY per zoom from the prior 24h of trades (not a
-        single global value — that would be a context leak).
+        single global value - that would be a context leak).
     current_price : float
         Forwarded to every zoom (it's the same trade timestamp).
     prior_24h_cache : (sec_arr, low_arr, high_arr) | None
         Pre-computed per-second prior-24h stats.  Build this ONCE per
-        sweep (not per row) — building it per row is O(n²) and
+        sweep (not per row) - building it per row is O(n²) and
         kills performance.  If None, this function builds the cache
         itself (slow on large datasets; only used for unit tests).
 
     Returns
     -------
     dict[str, float]
-        Keys prefixed ``micro_``, ``meso_``, ``macro_`` (30 × 3 = 90 total).
+        Keys prefixed ``micro_``, ``meso_``, ``macro_`` (36 × 3 = 108 total).
     """
     if rolling_stats_per_zoom is None:
         rolling_stats_per_zoom = {"micro": {}, "meso": {}, "macro": {}}
@@ -382,7 +506,7 @@ def extract_multi_zoom_features(
         np.minimum.at(sec_min, inv, trade_px)
         np.maximum.at(sec_max, inv, trade_px)
 
-        # Sliding-window 24h min/max using monotonic deques — O(n) total
+        # Sliding-window 24h min/max using monotonic deques - O(n) total
         from collections import deque
         day_secs = 86_400
         d24_low = np.empty(n_secs, dtype=np.float64)
@@ -450,10 +574,10 @@ def extract_multi_zoom_features(
         else:
             sliced_liq = liq_df
 
-        # Per-zoom rolling stats — this is the fix for the context leak
+        # Per-zoom rolling stats - this is the fix for the context leak
         rs = rolling_stats_per_zoom.get(prefix, {})
 
-        # Per-zoom prior-24h context — computed locally from the trades
+        # Per-zoom prior-24h context - computed locally from the trades
         # array, NOT a single global value.  Without this, vol_ratio and
         # price_position are the same number across all 3 zooms, which
         # is a context leak (caught by verify_dataset).

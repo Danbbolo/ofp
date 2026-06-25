@@ -119,7 +119,7 @@ class TestEmptyWindow:
     def test_exactly_30_keys(self) -> None:
         trades = _trades_df([])
         feats = _extract(trades)
-        assert len(feats) == 30
+        assert len(feats) == 36
 
 
 class TestSingleBuy:
@@ -509,7 +509,7 @@ class TestMultiZoom:
                 "macro": {"rolling_avg_volume": 30000.0},
             },
         )
-        assert len(feats) == 90
+        assert len(feats) == 108
         assert "micro_buy_volume" in feats
         assert "meso_buy_volume" in feats
         assert "macro_buy_volume" in feats
