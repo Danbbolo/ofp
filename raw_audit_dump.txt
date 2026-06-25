@@ -1,0 +1,167 @@
+# --- ofp/grid_sweeper.py ---
+"""
+grid_sweeper.py — Parametric grid sweep across historical data.
+
+Receives pre-converted DataFrames and pre-built book snapshot dict.
+Slides windows, extracts features, computes labels, yields one dict at a time.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Iterator
+
+import numpy as np
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+from ofp.feature_extractor import extract_multi_zoom_features
+
+
+class GridSweeper:
+    """Slides feature-extraction windows across pre-processed historical data."""
+
+    def __init__(
+        self,
+        window_sizes_sec: list[int],
+        horizons_sec: list[int],
+    ) -> None:
+        if not window_sizes_sec:
+            raise ValueError("window_sizes_sec must not be empty")
+        if not horizons_sec:
+            raise ValueError("horizons_sec must not be empty")
+
+        self._window_sizes_sec = window_sizes_sec
+        self._horizons_sec = horizons_sec
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def sweep(
+        self,
+        trades_df: pd.DataFrame,
+        book_snapshots: dict[int, tuple[list[tuple[float, float]], list[tuple[float, float]]]],
+        liq_df: pd.DataFrame,
+        rolling_avg_volume: float,
+        _24h_stats: dict[str, float] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """
+        Multi-zoom sweep: micro windows slide, meso (300s) + macro (1800s) fixed.
+        Horizons: [300, 900, 1800].
+        """
+        if _24h_stats is None:
+            _24h_stats = {}
+
+        trades = trades_df
+        liq = liq_df
+
+        MESO_MS = 300_000
+        MACRO_MS = 1_800_000
+
+        trade_ts = trades["timestamp_ms"].values
+        trade_px = trades["price"].values
+
+        def _price_at(target_ms: int) -> float | None:
+            idx = int(np.searchsorted(trade_ts, target_ms, side="left"))
+            if idx >= len(trade_ts):
+                return None
+            return float(trade_px[idx])
+
+        data_start_ms = int(trade_ts[0])
+        data_end_ms = int(trade_ts[-1])
+
+        rolling_stats = {
+            "rolling_avg_volume": rolling_avg_volume,
+            **_24h_stats,
+        }
+
+        for window_sec in self._window_sizes_sec:
+            micro_ms = window_sec * 1000
+            step_ms = micro_ms // 2
+
+            for horizon_sec in self._horizons_sec:
+                horizon_ms = horizon_sec * 1000
+                win_start = data_start_ms
+
+                while win_start + micro_ms + horizon_ms <= data_end_ms:
+                    win_end = win_start + micro_ms
+                    future_ms = win_end + horizon_ms
+
+                    current_px = _price_at(win_end)
+                    future_px = _price_at(future_ms)
+
+                    if current_px is None or future_px is None:
+                        win_start += step_ms
+                        continue
+
+                    rolling_stats["current_price"] = current_px
+
+                    feats = extract_multi_zoom_features(
+                        trades_df=trades,
+                        book_snapshots=book_snapshots,
+                        liq_df=liq,
+                        micro_window_ms=micro_ms,
+                        meso_window_ms=MESO_MS,
+                        macro_window_ms=MACRO_MS,
+                        end_time_ms=win_end,
+                        rolling_stats=rolling_stats,
+                    )
+
+                    outcome_pct = (future_px - current_px) / current_px
+                    outcome_binary = 1 if outcome_pct > 0 else 0
+
+                    yield {
+                        **feats,
+                        "outcome_pct": outcome_pct,
+                        "outcome_binary": outcome_binary,
+                        "window_size": window_sec,
+                        "horizon": horizon_sec,
+                        "window_end_ms": win_end,
+                    }
+
+                    win_start += step_ms
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def save_to_disk(
+        data_gen: Iterator[dict[str, Any]],
+        filepath: str,
+        chunk_size: int = 100_000,
+    ) -> None:
+        """
+        Consume *data_gen* and write to a single Parquet file in chunks.
+
+        Parameters
+        ----------
+        data_gen : Iterator[dict]
+            Typically the output of ``GridSweeper.sweep()``.
+        filepath : str
+            Path to the ``.parquet`` output file.
+        chunk_size : int
+            Rows per write batch.
+        """
+        writer: pq.ParquetWriter | None = None
+        buffer: list[dict[str, Any]] = []
+
+        for row in data_gen:
+            buffer.append(row)
+            if len(buffer) >= chunk_size:
+                batch = pa.RecordBatch.from_pylist(buffer)
+                if writer is None:
+                    writer = pq.ParquetWriter(filepath, batch.schema)
+                writer.write_batch(batch)
+                buffer.clear()
+
+        # Flush remainder
+        if buffer:
+            batch = pa.RecordBatch.from_pylist(buffer)
+            if writer is None:
+                writer = pq.ParquetWriter(filepath, batch.schema)
+            writer.write_batch(batch)
+
+        if writer is not None:
+            writer.close()
