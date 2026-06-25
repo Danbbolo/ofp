@@ -1,5 +1,5 @@
 """
-test_grid_sweeper.py — Tests for the GridSweeper.
+test_grid_sweeper.py â€” Tests for the GridSweeper.
 
 Covers: window count with 50 % overlap, outcome_binary thresholds,
 and generator behaviour (one-row-at-a-time, no in-memory accumulation).
@@ -42,7 +42,7 @@ class TestWindowCount:
     """Correct number of windows with 50 % overlap."""
 
     def test_window_count(self) -> None:
-        """40 trades spanning 2_000_000..2_039_000 ms — enough for macro window."""
+        """40 trades spanning 2_000_000..2_039_000 ms â€” enough for macro window."""
         trades = _trades_df([
             (2_000_000 + i * 1000, 70000.0, 1.0, False) for i in range(40)
         ])
@@ -54,11 +54,15 @@ class TestWindowCount:
             trades_df=trades,
             book_snapshots=book,
             liq_df=_empty_liq_df(),
-            rolling_avg_volume=1000.0,
+            rolling_stats_per_zoom={
+                "micro": {"rolling_avg_volume": 1000.0},
+                "meso":  {"rolling_avg_volume": 1000.0},
+                "macro": {"rolling_avg_volume": 1000.0},
+            },
         ))
 
-        # Valid: win_start + 2000 + 10000 <= 2_039_000 → win_start <= 2_027_000
-        # win_start starts at 2_000_000, step=1000 → 28 windows
+        # Valid: win_start + 2000 + 10000 <= 2_039_000 â†’ win_start <= 2_027_000
+        # win_start starts at 2_000_000, step=1000 â†’ 28 windows
         assert len(results) == 28
 
     def test_multiple_horizons(self) -> None:
@@ -73,19 +77,23 @@ class TestWindowCount:
             trades_df=trades,
             book_snapshots=book,
             liq_df=_empty_liq_df(),
-            rolling_avg_volume=1000.0,
+            rolling_stats_per_zoom={
+                "micro": {"rolling_avg_volume": 1000.0},
+                "meso":  {"rolling_avg_volume": 1000.0},
+                "macro": {"rolling_avg_volume": 1000.0},
+            },
         ))
 
         # W=2s, step=1s, H=10s (10000ms):
-        #   win_start + 2000 + 10000 <= 2_059_000 → ws <= 2_047_000
-        #   start=2_000_000, step=1000 → 48 windows
+        #   win_start + 2000 + 10000 <= 2_059_000 â†’ ws <= 2_047_000
+        #   start=2_000_000, step=1000 â†’ 48 windows
         # W=2s, step=1s, H=20s (20000ms):
-        #   ws + 2000 + 20000 <= 2_059_000 → ws <= 2_037_000 → 38 windows
+        #   ws + 2000 + 20000 <= 2_059_000 â†’ ws <= 2_037_000 â†’ 38 windows
         # W=4s, step=2s, H=10s:
-        #   ws + 4000 + 10000 <= 2_059_000 → ws <= 2_045_000
-        #   start=2_000_000, step=2000 → 23 windows
+        #   ws + 4000 + 10000 <= 2_059_000 â†’ ws <= 2_045_000
+        #   start=2_000_000, step=2000 â†’ 23 windows
         # W=4s, step=2s, H=20s:
-        #   ws + 4000 + 20000 <= 2_059_000 → ws <= 2_035_000 → 18 windows
+        #   ws + 4000 + 20000 <= 2_059_000 â†’ ws <= 2_035_000 â†’ 18 windows
         # Total = 48+38+23+18 = 127
         assert len(results) == 127
 
@@ -100,7 +108,7 @@ class TestOutcomeBinary:
     """outcome_binary thresholds."""
 
     def test_binary_one_when_up_enough(self) -> None:
-        """Future price > current by > 0.1 % → outcome_binary = 1."""
+        """Future price > current by > 0.1 % â†’ outcome_binary = 1."""
         trades = _trades_df([
             (2_000_000, 70000.0, 1.0, False),
             (2_001_000, 70000.0, 1.0, False),
@@ -114,7 +122,11 @@ class TestOutcomeBinary:
             trades_df=trades,
             book_snapshots=book,
             liq_df=_empty_liq_df(),
-            rolling_avg_volume=1000.0,
+            rolling_stats_per_zoom={
+                "micro": {"rolling_avg_volume": 1000.0},
+                "meso":  {"rolling_avg_volume": 1000.0},
+                "macro": {"rolling_avg_volume": 1000.0},
+            },
         ))
 
         assert len(results) == 1
@@ -123,7 +135,7 @@ class TestOutcomeBinary:
         assert r["outcome_binary"] == 1
 
     def test_binary_one_when_up_any_amount(self) -> None:
-        """Future price up +0.05 % → outcome_binary = 1 (>0 threshold)."""
+        """Future price up +0.05 % â†’ outcome_binary = 1 (>0 threshold)."""
         trades = _trades_df([
             (2_000_000, 70000.0, 1.0, False),
             (2_001_000, 70000.0, 1.0, False),
@@ -137,14 +149,18 @@ class TestOutcomeBinary:
             trades_df=trades,
             book_snapshots=book,
             liq_df=_empty_liq_df(),
-            rolling_avg_volume=1000.0,
+            rolling_stats_per_zoom={
+                "micro": {"rolling_avg_volume": 1000.0},
+                "meso":  {"rolling_avg_volume": 1000.0},
+                "macro": {"rolling_avg_volume": 1000.0},
+            },
         ))
 
         assert len(results) == 1
         assert results[0]["outcome_binary"] == 1
 
     def test_binary_zero_when_down(self) -> None:
-        """Future price below current → outcome_binary = 0."""
+        """Future price below current â†’ outcome_binary = 0."""
         trades = _trades_df([
             (2_000_000, 70000.0, 1.0, False),
             (2_001_000, 70000.0, 1.0, False),
@@ -158,13 +174,17 @@ class TestOutcomeBinary:
             trades_df=trades,
             book_snapshots=book,
             liq_df=_empty_liq_df(),
-            rolling_avg_volume=1000.0,
+            rolling_stats_per_zoom={
+                "micro": {"rolling_avg_volume": 1000.0},
+                "meso":  {"rolling_avg_volume": 1000.0},
+                "macro": {"rolling_avg_volume": 1000.0},
+            },
         ))
 
         assert results[0]["outcome_binary"] == 0
 
     def test_binary_zero_when_exact_same_price(self) -> None:
-        """Future price == current → outcome_binary = 0."""
+        """Future price == current â†’ outcome_binary = 0."""
         trades = _trades_df([
             (2_000_000, 70000.0, 1.0, False),
             (2_001_000, 70000.0, 1.0, False),
@@ -178,7 +198,11 @@ class TestOutcomeBinary:
             trades_df=trades,
             book_snapshots=book,
             liq_df=_empty_liq_df(),
-            rolling_avg_volume=1000.0,
+            rolling_stats_per_zoom={
+                "micro": {"rolling_avg_volume": 1000.0},
+                "meso":  {"rolling_avg_volume": 1000.0},
+                "macro": {"rolling_avg_volume": 1000.0},
+            },
         ))
 
         assert results[0]["outcome_pct"] == 0.0
@@ -199,7 +223,11 @@ class TestGeneratorBehaviour:
             trades_df=trades,
             book_snapshots=book,
             liq_df=_empty_liq_df(),
-            rolling_avg_volume=1000.0,
+            rolling_stats_per_zoom={
+                "micro": {"rolling_avg_volume": 1000.0},
+                "meso":  {"rolling_avg_volume": 1000.0},
+                "macro": {"rolling_avg_volume": 1000.0},
+            },
         )
 
         # Verify it's a generator (has __next__)
@@ -218,7 +246,7 @@ class TestGeneratorBehaviour:
         second = next(gen)
         assert second["window_end_ms"] > first["window_end_ms"]
 
-        # Consume the rest — should not blow up memory
+        # Consume the rest â€” should not blow up memory
         remaining = list(gen)
         assert len(remaining) >= 0  # just that it finishes
 
@@ -233,7 +261,11 @@ class TestGeneratorBehaviour:
             trades_df=trades,
             book_snapshots=book,
             liq_df=_empty_liq_df(),
-            rolling_avg_volume=1000.0,
+            rolling_stats_per_zoom={
+                "micro": {"rolling_avg_volume": 1000.0},
+                "meso":  {"rolling_avg_volume": 1000.0},
+                "macro": {"rolling_avg_volume": 1000.0},
+            },
         )
 
         with tempfile.TemporaryDirectory() as tmp:

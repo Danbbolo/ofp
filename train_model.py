@@ -41,13 +41,31 @@ LABEL_COLS = {"outcome_binary", "outcome_pct"}
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _chronological_split(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Split by window_end_ms: first 70% train, next 15% val, last 15% test."""
-    df = df.sort_values("window_end_ms").reset_index(drop=True)
-    n = len(df)
-    train_end = int(n * 0.70)
-    val_end = int(n * 0.85)
-    return df.iloc[:train_end], df.iloc[train_end:val_end], df.iloc[val_end:]
+def _chronological_split_per_pair(df: pd.DataFrame) -> dict[tuple[int, int], tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]]:
+    """
+    Chronological 70/15/15 split WITHIN each (window_size, horizon) pair.
+
+    Why per-pair: ``window_end_ms`` repeats across pairs (e.g. (60s, 300s)
+    and (60s, 900s) both have rows at the same time).  A global sort splits
+    those rows together, which is fine, but per-pair splitting is stricter
+    and ensures each pair's test set is strictly the latest 15 % of that
+    pair's data, with no contamination from other pairs' late-window rows.
+    """
+    out: dict[tuple[int, int], tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]] = {}
+    for (ws, hz), grp in df.groupby(["window_size", "horizon"], sort=True):
+        g = grp.sort_values("window_end_ms").reset_index(drop=True)
+        n = len(g)
+        if n < 3:
+            out[(int(ws), int(hz))] = (g, g.iloc[0:0], g.iloc[0:0])
+            continue
+        train_end = int(n * 0.70)
+        val_end = int(n * 0.85)
+        out[(int(ws), int(hz))] = (
+            g.iloc[:train_end],
+            g.iloc[train_end:val_end],
+            g.iloc[val_end:],
+        )
+    return out
 
 
 def _evaluate(
@@ -110,23 +128,23 @@ def main() -> None:
     print(f"  {len(FEATURE_COLS)} features")
     print()
 
-    # Chronological split
-    print("Chronological split (70/15/15) …")
-    train_all, val_all, test_all = _chronological_split(df)
-    print(f"  Train: {len(train_all):,}  Val: {len(val_all):,}  Test: {len(test_all):,}")
+    # Per-pair chronological split (70/15/15 within each (window_size, horizon))
+    print("Per-pair chronological split (70/15/15) …")
+    pair_splits = _chronological_split_per_pair(df)
+    total_train = sum(len(t) for t, _, _ in pair_splits.values())
+    total_val = sum(len(v) for _, v, _ in pair_splits.values())
+    total_test = sum(len(t) for _, _, t in pair_splits.values())
+    print(f"  Train: {total_train:,}  Val: {total_val:,}  Test: {total_test:,}")
     print()
 
     # Train one model per (window_size, horizon)
-    pairs = sorted(df[["window_size", "horizon"]].drop_duplicates().values.tolist())
+    pairs = sorted(pair_splits.keys())
     all_rows: list[dict] = []
 
     for i, (ws, hz) in enumerate(pairs):
-        ws, hz = int(ws), int(hz)
         print(f"[{i + 1}/{len(pairs)}] W={ws}s  H={hz}s …", end=" ", flush=True)
 
-        train = train_all[(train_all["window_size"] == ws) & (train_all["horizon"] == hz)]
-        val = val_all[(val_all["window_size"] == ws) & (val_all["horizon"] == hz)]
-        test = test_all[(test_all["window_size"] == ws) & (test_all["horizon"] == hz)]
+        train, val, test = pair_splits[(ws, hz)]
 
         if len(train) < 100 or len(val) < 50:
             print(f"SKIP (train={len(train)}, val={len(val)} — too few)")

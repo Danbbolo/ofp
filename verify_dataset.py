@@ -108,6 +108,39 @@ def main(filepath: str) -> None:
     else:
         _ok("No feature has >0.95 correlation with outcome_pct or outcome_binary")
 
+    # 2d. Multi-zoom context-leak check
+    # If the same base feature is shared across micro/meso/macro (e.g. due to
+    # a shared rolling_stats dict), those three columns will be perfectly
+    # correlated or constant multiples.  Any pair with |r| > 0.95 is a leak.
+    print("  Checking micro/meso/macro context leak …")
+    micro_cols = [c for c in feature_cols if c.startswith("micro_")]
+    leak_pairs = []
+    for mc in micro_cols:
+        base = mc[len("micro_"):]
+        meso_c = f"meso_{base}"
+        macro_c = f"macro_{base}"
+        if meso_c not in df.columns or macro_c not in df.columns:
+            continue
+        for other in (meso_c, macro_c):
+            a, b = df[mc], df[other]
+            if a.nunique() <= 1 or b.nunique() <= 1:
+                continue
+            try:
+                r = abs(a.corr(b))
+            except Exception:
+                continue
+            if r > 0.95:
+                leak_pairs.append((mc, other, r))
+
+    if leak_pairs:
+        for a, b, r in leak_pairs[:20]:  # cap output
+            _flag(f"{a} ↔ {b} |r|={r:.4f}  — context leak across zooms!")
+        if len(leak_pairs) > 20:
+            _flag(f"… and {len(leak_pairs) - 20} more leaked pairs")
+        anomalies += len(leak_pairs)
+    else:
+        _ok("Micro/meso/macro features are distinct (no context leak detected)")
+
     # ==================================================================
     # 3. DATA SANITY
     # ==================================================================

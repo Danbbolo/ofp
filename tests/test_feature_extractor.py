@@ -503,7 +503,11 @@ class TestMultiZoom:
             meso_window_ms=120_000,
             macro_window_ms=300_000,
             end_time_ms=100_000,
-            rolling_stats={"rolling_avg_volume": 1000.0},
+            rolling_stats_per_zoom={
+                "micro": {"rolling_avg_volume": 1000.0},
+                "meso":  {"rolling_avg_volume": 5000.0},
+                "macro": {"rolling_avg_volume": 30000.0},
+            },
         )
         assert len(feats) == 90
         assert "micro_buy_volume" in feats
@@ -523,7 +527,11 @@ class TestMultiZoom:
             meso_window_ms=60_000,
             macro_window_ms=300_000,
             end_time_ms=100_000,
-            rolling_stats={"rolling_avg_volume": 1000.0},
+            rolling_stats_per_zoom={
+                "micro": {"rolling_avg_volume": 1000.0},
+                "meso":  {"rolling_avg_volume": 5000.0},
+                "macro": {"rolling_avg_volume": 30000.0},
+            },
         )
         # All trade volumes zero since no trades exist
         assert feats["micro_buy_volume"] == 0.0
@@ -552,7 +560,11 @@ class TestMultiZoom:
             meso_window_ms=60_000,    # [40K, 100K] → sees trades at 50K, 85K → 5.0
             macro_window_ms=300_000,  # [-200K, 100K] → sees all three → 6.0
             end_time_ms=100_000,
-            rolling_stats={"rolling_avg_volume": 1000.0},
+            rolling_stats_per_zoom={
+                "micro": {"rolling_avg_volume": 1000.0},
+                "meso":  {"rolling_avg_volume": 5000.0},
+                "macro": {"rolling_avg_volume": 30000.0},
+            },
         )
         assert feats["micro_buy_volume"] == 3.0
         assert feats["meso_buy_volume"] == 5.0

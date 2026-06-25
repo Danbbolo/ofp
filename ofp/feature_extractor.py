@@ -56,23 +56,32 @@ def extract_features(
     """
     # ------------------------------------------------------------------
     # trades_df is assumed pre-sliced to [window_start_ms, window_end_ms)
-    # by the caller (GridSweeper).  No internal filtering here.
+    # by the caller (GridSweeper).  No internal filtering, no copy.
+    # Work on numpy views to avoid per-window DataFrame allocation.
     # ------------------------------------------------------------------
-    win = trades_df.copy()
+    trade_ts = trades_df["timestamp_ms"].values
+    trade_px = trades_df["price"].values
+    trade_sz = trades_df["size"].values
+    # Force bool dtype: source columns may be object (Python bool) and
+    # numpy refuses to use object arrays as boolean indices.
+    trade_bm = trades_df["is_buyer_maker"].astype(bool).values
 
-    # Pre-compute signed size: + for buys (aggressor=BUYER → is_buyer_maker=False),
-    #                          − for sells (aggressor=SELLER → is_buyer_maker=True)
-    win["signed_size"] = win["size"].where(~win["is_buyer_maker"], -win["size"])
+    n_trades = len(trade_ts)
+    # Pre-compute signed size: + for buys (aggressor=BUYER → bm=False),
+    #                          − for sells (aggressor=SELLER → bm=True)
+    signed_size = np.where(trade_bm, -trade_sz, trade_sz)
+    buy_mask = ~trade_bm
+    sell_mask = trade_bm
 
     # ------------------------------------------------------------------
     # Group A — The Attack (Market Trades)  [keys  1–12]
     # ------------------------------------------------------------------
 
     # 1. buy_volume
-    buy_volume = float(win.loc[~win["is_buyer_maker"], "size"].sum())
+    buy_volume = float(trade_sz[buy_mask].sum())
 
     # 2. sell_volume
-    sell_volume = float(win.loc[win["is_buyer_maker"], "size"].sum())
+    sell_volume = float(trade_sz[sell_mask].sum())
 
     # 3. net_volume
     net_volume = buy_volume - sell_volume
@@ -85,21 +94,20 @@ def extract_features(
     volume_vs_avg = total_volume / (rolling_avg_volume + 1e-9)
 
     # 6. large_trade_net
-    n_trades = len(win)
     if n_trades > 0:
         avg_trade_size = total_volume / n_trades
         threshold = 2.0 * avg_trade_size
-        large_mask = win["size"] > threshold
-        large_trade_net = float(win.loc[large_mask, "signed_size"].sum())
+        large_mask = trade_sz > threshold
+        large_trade_net = float(signed_size[large_mask].sum())
     else:
         large_trade_net = 0.0
 
     # 7. acceleration  (second half net − first half net)
     if n_trades > 0:
         mid_ms = window_start_ms + (window_end_ms - window_start_ms) / 2.0
-        first_half = win.loc[win["timestamp_ms"] < mid_ms, "signed_size"].sum()
-        second_half = win.loc[win["timestamp_ms"] >= mid_ms, "signed_size"].sum()
-        acceleration = float(second_half - first_half)
+        first_half = float(signed_size[trade_ts < mid_ms].sum())
+        second_half = float(signed_size[trade_ts >= mid_ms].sum())
+        acceleration = second_half - first_half
     else:
         acceleration = 0.0
 
@@ -107,20 +115,18 @@ def extract_features(
     window_dur = window_end_ms - window_start_ms
 
     if n_trades > 0 and window_dur > 0:
-        win_sorted = win.sort_values("timestamp_ms")
-        cum_net = win_sorted["signed_size"].cumsum().values
+        # Sort by timestamp once, get the permutation indices.
+        order = np.argsort(trade_ts, kind="stable")
+        sorted_ts = trade_ts[order]
+        sorted_signed = signed_size[order]
+        cum_net = np.cumsum(sorted_signed)
 
         # Compute fractional position [0, 1] for each trade within the window
-        frac = (win_sorted["timestamp_ms"].values - window_start_ms) / window_dur
+        frac = (sorted_ts - window_start_ms) / window_dur
 
+        # Vectorized: index of last frac <= limit  (O(log n) per query)
         def _cum_at(limit: float) -> float:
-            """Last cumulative value where frac <= limit, else 0.0."""
-            idx = -1
-            for i, f in enumerate(frac):
-                if f <= limit:
-                    idx = i
-                else:
-                    break
+            idx = int(np.searchsorted(frac, limit, side="right")) - 1
             if idx >= 0:
                 return float(cum_net[idx])
             return 0.0
@@ -203,8 +209,8 @@ def extract_features(
 
     # 28.  vol_ratio  (window range / 24h average range)
     if n_trades > 0:
-        max_price = float(win["price"].max())
-        min_price = float(win["price"].min())
+        max_price = float(trade_px.max())
+        min_price = float(trade_px.min())
         vol_ratio = (max_price - min_price) / (_24h_avg_range + 1e-9)
     else:
         vol_ratio = 0.0
@@ -214,8 +220,8 @@ def extract_features(
 
     # 30.  trend_slope  ((last − first) / first)
     if n_trades > 0:
-        first_price = float(win["price"].iloc[0])
-        last_price = float(win["price"].iloc[-1])
+        first_price = float(trade_px[0])
+        last_price = float(trade_px[-1])
         trend_slope = (last_price - first_price) / (first_price + 1e-9)
     else:
         trend_slope = 0.0
@@ -273,14 +279,31 @@ def extract_multi_zoom_features(
     meso_window_ms: int,
     macro_window_ms: int,
     end_time_ms: int,
-    rolling_stats: dict[str, float],
+    rolling_stats_per_zoom: dict[str, dict[str, float]] | None = None,
+    current_price: float = 0.0,
 ) -> dict[str, float]:
     """
     Extract features at 3 zoom levels sharing the same *end_time_ms*.
 
-    Returns a dict with keys prefixed ``micro_``, ``meso_``, ``macro_``
-    (30 features × 3 = 90 keys total).
+    Parameters
+    ----------
+    rolling_stats_per_zoom : dict
+        ``{"micro": {...}, "meso": {...}, "macro": {...}}`` — each holds
+        ``rolling_avg_volume`` (typical volume in a window of that zoom's
+        size), plus optional ``_24h_avg_range`` / ``_24h_low`` / ``_24h_high``.
+        Each zoom MUST get its own baseline — passing a single global
+        value across zooms is a context leak.
+    current_price : float
+        Forwarded to every zoom (it's the same trade timestamp).
+
+    Returns
+    -------
+    dict[str, float]
+        Keys prefixed ``micro_``, ``meso_``, ``macro_`` (30 × 3 = 90 total).
     """
+    if rolling_stats_per_zoom is None:
+        rolling_stats_per_zoom = {"micro": {}, "meso": {}, "macro": {}}
+
     # Book lookup helper
     snap_ts = np.array(sorted(book_snapshots.keys()), dtype=np.int64)
 
@@ -294,7 +317,7 @@ def extract_multi_zoom_features(
 
     result: dict[str, float] = {}
 
-    # Pre-index timestamps for fast slicing
+    # Pre-index timestamps for fast slicing (no DataFrame copy per zoom)
     trade_ts = trades_df["timestamp_ms"].values
     trade_px = trades_df["price"].values
     trade_sz = trades_df["size"].values
@@ -304,10 +327,12 @@ def extract_multi_zoom_features(
     liq_px = liq_df["price"].values if len(liq_df) > 0 else None
     liq_sz = liq_df["size"].values if len(liq_df) > 0 else None
 
-    for prefix, window_ms in [("micro", micro_window_ms), ("meso", meso_window_ms), ("macro", macro_window_ms)]:
+    zooms = [("micro", micro_window_ms), ("meso", meso_window_ms), ("macro", macro_window_ms)]
+
+    for prefix, window_ms in zooms:
         win_start = end_time_ms - window_ms
 
-        # Slice trades using numpy (fast, no-copy views into columns)
+        # Slice trades using numpy (zero-copy views into the underlying arrays)
         t_start = int(np.searchsorted(trade_ts, win_start, side="left"))
         t_end = int(np.searchsorted(trade_ts, end_time_ms, side="left"))
         sliced_trades = pd.DataFrame({
@@ -329,6 +354,9 @@ def extract_multi_zoom_features(
         else:
             sliced_liq = liq_df
 
+        # Per-zoom rolling stats — this is the fix for the context leak
+        rs = rolling_stats_per_zoom.get(prefix, {})
+
         feats = extract_features(
             trades_df=sliced_trades,
             book_snapshot_start=_book_at(win_start),
@@ -336,11 +364,11 @@ def extract_multi_zoom_features(
             liq_df=sliced_liq,
             window_start_ms=win_start,
             window_end_ms=end_time_ms,
-            rolling_avg_volume=rolling_stats.get("rolling_avg_volume", 0.0),
-            current_price=rolling_stats.get("current_price", 0.0),
-            _24h_avg_range=rolling_stats.get("_24h_avg_range", 0.0),
-            _24h_low=rolling_stats.get("_24h_low", 0.0),
-            _24h_high=rolling_stats.get("_24h_high", 0.0),
+            rolling_avg_volume=rs.get("rolling_avg_volume", 0.0),
+            current_price=current_price,
+            _24h_avg_range=rs.get("_24h_avg_range", 0.0),
+            _24h_low=rs.get("_24h_low", 0.0),
+            _24h_high=rs.get("_24h_high", 0.0),
         )
         for k, v in feats.items():
             result[f"{prefix}_{k}"] = v

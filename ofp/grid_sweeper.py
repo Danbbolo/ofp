@@ -42,15 +42,21 @@ class GridSweeper:
         trades_df: pd.DataFrame,
         book_snapshots: dict[int, tuple[list[tuple[float, float]], list[tuple[float, float]]]],
         liq_df: pd.DataFrame,
-        rolling_avg_volume: float,
-        _24h_stats: dict[str, float] | None = None,
+        rolling_stats_per_zoom: dict[str, dict[str, float]] | None = None,
     ) -> Iterator[dict[str, Any]]:
         """
         Multi-zoom sweep: micro windows slide, meso (300s) + macro (1800s) fixed.
         Horizons: [300, 900, 1800].
+
+        Parameters
+        ----------
+        rolling_stats_per_zoom
+            ``{"micro": {...}, "meso": {...}, "macro": {...}}`` — each zoom
+            must have its own ``rolling_avg_volume`` baseline.  Passing a
+            single global value across zooms is a context leak.
         """
-        if _24h_stats is None:
-            _24h_stats = {}
+        if rolling_stats_per_zoom is None:
+            rolling_stats_per_zoom = {"micro": {}, "meso": {}, "macro": {}}
 
         trades = trades_df
         liq = liq_df
@@ -69,11 +75,6 @@ class GridSweeper:
 
         data_start_ms = int(trade_ts[0])
         data_end_ms = int(trade_ts[-1])
-
-        rolling_stats = {
-            "rolling_avg_volume": rolling_avg_volume,
-            **_24h_stats,
-        }
 
         for window_sec in self._window_sizes_sec:
             micro_ms = window_sec * 1000
@@ -94,8 +95,6 @@ class GridSweeper:
                         win_start += step_ms
                         continue
 
-                    rolling_stats["current_price"] = current_px
-
                     feats = extract_multi_zoom_features(
                         trades_df=trades,
                         book_snapshots=book_snapshots,
@@ -104,7 +103,8 @@ class GridSweeper:
                         meso_window_ms=MESO_MS,
                         macro_window_ms=MACRO_MS,
                         end_time_ms=win_end,
-                        rolling_stats=rolling_stats,
+                        rolling_stats_per_zoom=rolling_stats_per_zoom,
+                        current_price=current_px,
                     )
 
                     outcome_pct = (future_px - current_px) / current_px

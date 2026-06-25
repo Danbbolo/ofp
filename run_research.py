@@ -64,7 +64,12 @@ def _build_book_snapshots_multi(
 ) -> dict[int, tuple[list, list]]:
     """
     Build 1-second book snapshots incrementally across multiple days.
-    OrderBookReconstructor state persists across day boundaries.
+
+    Uses **running book state** between seconds — at every second boundary
+    the current top-20 is snapshotted, then deltas in the new second are
+    applied on top.  This is O(n) total applies, and most importantly
+    the snapshot reflects the cumulative book state at that second, not
+    a rebuild from just that second's events.
     """
     start = datetime.strptime(start_str, "%Y-%m-%d")
     end = datetime.strptime(end_str, "%Y-%m-%d")
@@ -72,9 +77,9 @@ def _build_book_snapshots_multi(
     recon = OrderBookReconstructor()
     snapshots: dict[int, tuple[list, list]] = {}
     total_rows = 0
+    current_sec: int = -1  # last second we have applied at least one delta of
 
     d = start
-    day_idx = 0
     while d <= end:
         date_str = d.strftime("%Y-%m-%d")
         fpath = RAW_DIR / date_str / "book.parquet"
@@ -83,21 +88,16 @@ def _build_book_snapshots_multi(
             d += timedelta(days=1)
             continue
 
-        df = pd.read_parquet(fpath)
-        if day_idx == 0:
-            print(f"    [debug] book columns: {list(df.columns)}")
-            print(f"    [debug] event_type values: {df['event_type'].value_counts().to_dict()}")
-        day_idx += 1
-
-        # Process via numpy from Arrow batch (no pandas, minimal memory)
         import pyarrow.parquet as pq
         pf = pq.ParquetFile(fpath)
         day_rows = 0
-        bucket_rows: list[dict] = []
+        # Reset the running book at day boundary — book state doesn't persist
+        # across days because the trading day starts with a fresh order book.
+        recon.clear()
         current_sec = -1
 
         for batch in pf.iter_batches(batch_size=200_000):
-            ev = batch.column("event_time").to_numpy()
+            ev = batch.column("event_time").to_numpy(zero_copy_only=False)
             sd = batch.column("side").to_pylist()
             px = batch.column("price").to_pylist()
             qt = batch.column("quantity").to_pylist()
@@ -106,29 +106,20 @@ def _build_book_snapshots_multi(
             for i in range(m):
                 sec = int(ev[i]) // 1000
 
-                if sec != current_sec and bucket_rows:
-                    recon.clear()
-                    for r in bucket_rows:
-                        recon.apply(side=r["side"], price=r["price"], quantity=r["quantity"])
+                if sec != current_sec and current_sec >= 0:
+                    # Crossed into a new second — snapshot the state at the
+                    # END of the previous second (cumulative book).
                     key = current_sec * 1000
                     if key not in snapshots:
                         snapshots[key] = recon.top_n(20)
-                    bucket_rows.clear()
 
+                # Apply this delta to the running book.
+                recon.apply(side=sd[i], price=float(px[i]), quantity=float(qt[i]))
                 current_sec = sec
-                bucket_rows.append({
-                    "side": sd[i],
-                    "price": float(px[i]),
-                    "quantity": float(qt[i]),
-                })
-
             day_rows += m
 
-        # Final second
-        if bucket_rows:
-            recon.clear()
-            for r in bucket_rows:
-                recon.apply(side=r["side"], price=r["price"], quantity=r["quantity"])
+        # End-of-day: snapshot the final second too.
+        if current_sec >= 0:
             key = current_sec * 1000
             if key not in snapshots:
                 snapshots[key] = recon.top_n(20)
@@ -212,15 +203,34 @@ def main(start_str: str, end_str: str) -> None:
     print("Building book snapshots …", flush=True)
     book_snapshots = _build_book_snapshots_multi(start_str, end_str)
 
-    # --- Compute globals ---
-    rolling_avg_volume = float(trades_df["size"].sum() / max(len(trades_df), 1))
-    _24h_stats = {
-        "_24h_avg_range": float(trades_df["price"].max() - trades_df["price"].min()),
-        "_24h_low": float(trades_df["price"].min()),
-        "_24h_high": float(trades_df["price"].max()),
+    # --- Compute per-zoom rolling baselines (fixes context leak) ---
+    # For each zoom, the baseline is the average volume in a window of that
+    # zoom's size.  Computed from the entire dataset so it is a stable
+    # reference.  Each zoom MUST get its own baseline — using a single
+    # global value means the macro feature is just a scaled version of
+    # the micro feature, which leaks context.
+    data_duration_ms = int(trades_df["timestamp_ms"].iloc[-1]) - int(trades_df["timestamp_ms"].iloc[0])
+    total_volume = float(trades_df["size"].sum())
+    if data_duration_ms <= 0:
+        print("ERROR: data duration is non-positive.")
+        sys.exit(1)
+
+    def _avg_volume_per_window(window_ms: int) -> float:
+        n_windows = max(data_duration_ms // window_ms, 1)
+        return total_volume / n_windows
+
+    MESO_MS = 300_000
+    MACRO_MS = 1_800_000
+    micro_window_ms = WINDOW_SIZES_SEC[0] * 1000
+
+    rolling_stats_per_zoom = {
+        "micro": {"rolling_avg_volume": _avg_volume_per_window(micro_window_ms)},
+        "meso":  {"rolling_avg_volume": _avg_volume_per_window(MESO_MS)},
+        "macro": {"rolling_avg_volume": _avg_volume_per_window(MACRO_MS)},
     }
-    print(f"  Rolling avg volume: {rolling_avg_volume:.4f}")
-    print(f"  Range: {_24h_stats['_24h_low']:.2f} – {_24h_stats['_24h_high']:.2f}")
+    print(f"  Per-zoom baselines:")
+    for z, rs in rolling_stats_per_zoom.items():
+        print(f"    {z:>5}: rolling_avg_volume = {rs['rolling_avg_volume']:.4f}")
     print("  Sweeping …", flush=True)
 
     # --- Sweep ---
@@ -230,8 +240,7 @@ def main(start_str: str, end_str: str) -> None:
         trades_df=trades_df,
         book_snapshots=book_snapshots,
         liq_df=liq_df,
-        rolling_avg_volume=rolling_avg_volume,
-        _24h_stats=_24h_stats,
+        rolling_stats_per_zoom=rolling_stats_per_zoom,
     )
 
     def _progress(iterator):
