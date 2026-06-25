@@ -112,11 +112,23 @@ def main(filepath: str) -> None:
     # If the same base feature is shared across micro/meso/macro (e.g. due to
     # a shared rolling_stats dict), those three columns will be perfectly
     # correlated or constant multiples.  Any pair with |r| > 0.95 is a leak.
+    #
+    # Skip features that are *legitimately* shared across zooms by
+    # construction: book snapshots are looked up at the same `end_time_ms`
+    # for all 3 zooms (so the book at instant T is the same number),
+    # and time features (hour_sin, hour_cos) are computed from the same
+    # window_end_ms.  These are not leaks — they're invariants.
+    LEGIT_SHARED_FEATURES = {
+        "bid_ask_imbalance", "bid_wall", "ask_wall", "wall_asymmetry",
+        "spread_bps", "book_depth_slope", "hour_sin", "hour_cos",
+    }
     print("  Checking micro/meso/macro context leak …")
     micro_cols = [c for c in feature_cols if c.startswith("micro_")]
     leak_pairs = []
     for mc in micro_cols:
         base = mc[len("micro_"):]
+        if base in LEGIT_SHARED_FEATURES:
+            continue
         meso_c = f"meso_{base}"
         macro_c = f"macro_{base}"
         if meso_c not in df.columns or macro_c not in df.columns:
