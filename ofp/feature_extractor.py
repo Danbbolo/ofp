@@ -338,13 +338,12 @@ def extract_features(
         pmax = float(trade_px.max())
         if pmax > pmin:
             n_bins = 10
+            # Vectorized bucketing — np.searchsorted + np.bincount replaces
+            # the Python for-loop.  Was the main sweep bottleneck.
             edges = np.linspace(pmin, pmax, n_bins + 1)
-            # Volume at each price bin
-            bin_vol = np.zeros(n_bins)
-            for s, p in zip(trade_sz, trade_px):
-                b = int((p - pmin) / (pmax - pmin) * n_bins)
-                b = min(b, n_bins - 1)
-                bin_vol[b] += s
+            bin_idx = np.searchsorted(edges, trade_px, side="right") - 1
+            bin_idx = np.clip(bin_idx, 0, n_bins - 1)
+            bin_vol = np.bincount(bin_idx, weights=trade_sz, minlength=n_bins)
             total = bin_vol.sum()
             if total > 0:
                 p = bin_vol / total
