@@ -114,10 +114,17 @@ def main(filepath: str) -> None:
     # correlated or constant multiples.  Any pair with |r| > 0.95 is a leak.
     #
     # Skip features that are *legitimately* shared across zooms by
-    # construction: book snapshots are looked up at the same `end_time_ms`
-    # for all 3 zooms (so the book at instant T is the same number),
-    # and time features (hour_sin, hour_cos) are computed from the same
-    # window_end_ms.  These are not leaks — they're invariants.
+    # construction:
+    #  - book snapshots (looked up at the same end_time_ms across all 3
+    #    zooms → same book state → same number)
+    #  - time features (hour_sin, hour_cos: computed from window_end_ms,
+    #    which is the same across all 3 zooms)
+    #  - prior-24h range features (_24h_low/_24h_high are the SAME number
+    #    across all 3 zooms because end_time_ms is the same — the lookback
+    #    window of 24h is much longer than any zoom window).  vol_ratio
+    #    and price_position therefore use the same denominator across
+    #    all 3 zooms; only the numerator (local window range / local low)
+    #    differs.  This is correct.
     LEGIT_SHARED_FEATURES = {
         "bid_ask_imbalance", "bid_wall", "ask_wall", "wall_asymmetry",
         "spread_bps", "book_depth_slope", "hour_sin", "hour_cos",
