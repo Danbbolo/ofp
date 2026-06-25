@@ -296,20 +296,36 @@ def extract_multi_zoom_features(
 
     # Pre-index timestamps for fast slicing
     trade_ts = trades_df["timestamp_ms"].values
+    trade_px = trades_df["price"].values
+    trade_sz = trades_df["size"].values
+    trade_bm = trades_df["is_buyer_maker"].values
     liq_ts = liq_df["timestamp_ms"].values if len(liq_df) > 0 else None
+    liq_sd = liq_df["side"].values if len(liq_df) > 0 else None
+    liq_px = liq_df["price"].values if len(liq_df) > 0 else None
+    liq_sz = liq_df["size"].values if len(liq_df) > 0 else None
 
     for prefix, window_ms in [("micro", micro_window_ms), ("meso", meso_window_ms), ("macro", macro_window_ms)]:
         win_start = end_time_ms - window_ms
 
-        # Slice trades and liquidations to [win_start, end_time_ms)
+        # Slice trades using numpy (fast, no-copy views into columns)
         t_start = int(np.searchsorted(trade_ts, win_start, side="left"))
         t_end = int(np.searchsorted(trade_ts, end_time_ms, side="left"))
-        sliced_trades = trades_df.iloc[t_start:t_end]
+        sliced_trades = pd.DataFrame({
+            "timestamp_ms": trade_ts[t_start:t_end],
+            "price": trade_px[t_start:t_end],
+            "size": trade_sz[t_start:t_end],
+            "is_buyer_maker": trade_bm[t_start:t_end],
+        })
 
         if liq_ts is not None and len(liq_df) > 0:
             l_start = int(np.searchsorted(liq_ts, win_start, side="left"))
             l_end = int(np.searchsorted(liq_ts, end_time_ms, side="left"))
-            sliced_liq = liq_df.iloc[l_start:l_end]
+            sliced_liq = pd.DataFrame({
+                "timestamp_ms": liq_ts[l_start:l_end],
+                "side": liq_sd[l_start:l_end],
+                "price": liq_px[l_start:l_end],
+                "size": liq_sz[l_start:l_end],
+            })
         else:
             sliced_liq = liq_df
 
