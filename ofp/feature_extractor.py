@@ -207,7 +207,13 @@ def extract_features(
     hour_sin = math.sin(2.0 * math.pi * hour / 24.0)
     hour_cos = math.cos(2.0 * math.pi * hour / 24.0)
 
-    # 28.  vol_ratio  (window range / 24h average range)
+    # 28.  vol_ratio  (window range / average range over the same window)
+    # NOTE: using the window's own range as its own "average range" gives
+    # vol_ratio = 1.0, which is uninformative.  Use the **previous** window
+    # of the same size (if available) as the reference, or fall back to
+    # the passed-in 24h baseline.  Computing a true rolling 24h average
+    # requires streaming price history; for now use the passed-in
+    # _24h_avg_range as a stable reference.
     if n_trades > 0:
         max_price = float(trade_px.max())
         min_price = float(trade_px.min())
@@ -215,8 +221,18 @@ def extract_features(
     else:
         vol_ratio = 0.0
 
-    # 29.  price_position  ((current − 24h_low) / (24h_high − 24h_low))
-    price_position = (current_price - _24h_low) / (_24h_high - _24h_low + 1e-9)
+    # 29.  price_position  ((current − local_low) / (local_high − local_low))
+    # IMPORTANT: low/high must be LOCAL to this window, not a single global
+    # 24h value, otherwise all three zoom levels see the exact same number
+    # and the correlation between micro/meso/macro price_position = 1.0
+    # (a context leak).  Use the window's own min/max.
+    if n_trades > 0:
+        local_low = float(trade_px.min())
+        local_high = float(trade_px.max())
+    else:
+        local_low = _24h_low
+        local_high = _24h_high
+    price_position = (current_price - local_low) / (local_high - local_low + 1e-9)
 
     # 30.  trend_slope  ((last − first) / first)
     if n_trades > 0:
