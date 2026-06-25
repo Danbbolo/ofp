@@ -18,7 +18,7 @@ import pandas as pd
 # Config
 # ---------------------------------------------------------------------------
 
-INPUT_FILE = "data/research_dataset.parquet"
+INPUT_FILE = "data/research_dataset_relabel.parquet"
 OUTPUT_FILE = "data/expectancy_table.csv"
 THRESHOLDS = [0.55, 0.58, 0.60, 0.62, 0.65, 0.68, 0.70, 0.75, 0.80]
 COST_PER_TRADE = 0.001  # 0.1 %

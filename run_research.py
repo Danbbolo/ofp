@@ -33,7 +33,9 @@ OUTPUT_DIR = Path("data")
 OUTPUT_FILE = OUTPUT_DIR / "research_dataset.parquet"
 
 WINDOW_SIZES_SEC = [60, 120, 180]
-HORIZONS_SEC = [300, 900, 1800]
+# Horizons chosen for ride-style trading: 30m, 1h, 2h, 4h.
+# 5/15 min were too short to capture "the move" — see audit notes.
+HORIZONS_SEC = [1800, 3600, 7200, 14400]
 PROGRESS_EVERY = 10_000
 
 
