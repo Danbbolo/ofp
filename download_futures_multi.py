@@ -28,7 +28,7 @@ while d <= end:
     day_dir = OUTPUT_ROOT / date_str
     day_dir.mkdir(parents=True, exist_ok=True)
 
-    if (day_dir / "trades.parquet").exists():
+    if (day_dir / "trades.parquet").exists() and (day_dir / "book.parquet").exists() and (day_dir / "liq.parquet").exists():
         print(f"[{date_str}] already downloaded, skipping")
         d += timedelta(days=1)
         continue
