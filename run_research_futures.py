@@ -12,16 +12,25 @@ import run_research
 
 
 def _prepare_liq_futures(df: pd.DataFrame) -> pd.DataFrame:
-    """Patched for futures liq format: event_time, quantity, side=BUY/SELL."""
+    """Patched for futures liq format: event_time, quantity, side=BUY/SELL.
+
+    Convention in feature_extractor:
+        side="SELL" → long liquidation (taker sold, forced the long out)
+        side="BUY"  → short liquidation (taker bought, forced the short out)
+
+    cryptohftdata convention:
+        order side "BUY"  = taker BUY  = short liquidation
+        order side "SELL" = taker SELL = long liquidation
+
+    So NO MAPPING is needed — pass through.
+    """
     if df.empty or len(df.columns) == 0:
         return pd.DataFrame(columns=["timestamp_ms", "side", "price", "size"])
     out = pd.DataFrame()
     out["timestamp_ms"] = df["event_time"].astype("int64")
     out["price"] = df["price"].astype(float)
     out["size"] = df["quantity"].astype(float)
-    # Map side: BUY = long liquidation (forced SELL), SELL = short liquidation (forced BUY)
-    # The feature extractor expects "buy" or "sell" to indicate the taker side
-    out["side"] = df["side"].map({"BUY": "sell", "SELL": "buy"})
+    out["side"] = df["side"].str.lower()  # BUY -> buy, SELL -> sell
     return out[["timestamp_ms", "side", "price", "size"]]
 
 
