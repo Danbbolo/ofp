@@ -34,9 +34,14 @@ In v9, a bid at 63011.35 sat in the book for **6.22 hours** (last update 04:00, 
 
 ## Server (as of 2026-06-26)
 
-- **Hetzner decommissioned** (out of credits) — all work committed locally
-- 3 uncommitted-or-unpushed changes on Hetzner: fix, docs, src/data
-- New server TBD
+- **Azure (CURRENT)**: `azureuser@172.178.80.203` (62GB RAM, 122GB disk, Ubuntu 24.04, 16 cores)
+- SSH key: `C:\Users\User\Desktop\ofp.pem` (ed25519)
+- SSH from Windows: `ssh -i C:\Users\User\Desktop\ofp.pem azureuser@172.178.80.203`
+- Project path: `/home/azureuser/ofp/`
+- Venv: `.venv/bin/python` (Python 3.12.3, lightgbm 4.6.0, all deps installed)
+- V10 fix committed on Azure: `f6bfcbd` (was missing, now restored)
+- **Hetzner is OFF** (out of credits). Do NOT use Hetzner paths in any new work.
+- 90/90 tests pass on Azure
 
 ## Project summary
 
@@ -107,14 +112,15 @@ In v9, a bid at 63011.35 sat in the book for **6.22 hours** (last update 04:00, 
 - **Commit small**; changes touching fills/P&L carry a test catching their failure mode
 - **Listen to trader frustration as a signal** (caught the liq case bug)
 
-## Next steps (when Hetzner boots)
+## Next steps (on Azure, can start immediately)
 
-1. Push the 3 unpushed commits to GitHub (need user to paste a fine-grained GitHub PAT)
-2. Run `_trace_target.py` against v10 dataset — check if direction-match improved from 60% (v9)
-3. Sweep 60+ days for OOS validation
-4. Add funding rate + OI features (data is already there in `data/historical/`)
-5. Walk-forward test (rolling retrain)
-6. Look at combining with chart pattern trigger (the trader's method)
+1. **Download data to Azure** (Hetzner data is GONE): `download_raw_data.py 2026-06-17 2026-06-23` (~30 min for 7 days)
+2. Run sweep on Azure: `nohup .venv/bin/python -u run_research.py 2026-06-17 2026-06-23 > /tmp/sweep_v10_azure.log 2>&1 &` (~90 min)
+3. Run `_trace_target.py` against v10 dataset — check if direction-match improved from 60% (v9)
+4. Sweep 60+ days for OOS validation
+5. Add funding rate + OI features (data is already there in `data/historical/`)
+6. Walk-forward test (rolling retrain)
+7. Look at combining with chart pattern trigger (the trader's method)
 
 ## Team structure
 
