@@ -287,3 +287,86 @@ class TestBucketedSnapshots:
 
         # Bucket 2 — snapshot cleared, then update applied
         assert results[2][1] == [(71000.0, 2.0)]
+
+
+class TestStaleEviction:
+    """Stale-level eviction prevents ghost levels from contaminating snapshots.
+
+    See docs/orderbook_data_audit.md for the bug this fixes.
+    """
+
+    def test_evict_stale_removes_old_bid(self) -> None:
+        recon = OrderBookReconstructor()
+        # Place a bid at t=0, no further updates
+        recon.apply("bid", 100.0, 1.0, timestamp_ms=0)
+        # At t=60s, evict with max_age=30s → bid should be gone
+        n = recon.evict_stale(current_time_ms=60_000, max_age_ms=30_000)
+        assert n == 1
+        bids, _ = recon.top_n(20)
+        assert bids == []
+
+    def test_evict_stale_keeps_recent_bid(self) -> None:
+        recon = OrderBookReconstructor()
+        recon.apply("bid", 100.0, 1.0, timestamp_ms=0)
+        # At t=10s, max_age=30s → bid is recent, keep
+        n = recon.evict_stale(current_time_ms=10_000, max_age_ms=30_000)
+        assert n == 0
+        bids, _ = recon.top_n(20)
+        assert bids == [(100.0, 1.0)]
+
+    def test_evict_stale_keeps_updated_bid(self) -> None:
+        """A bid that was placed long ago but updated recently survives."""
+        recon = OrderBookReconstructor()
+        recon.apply("bid", 100.0, 1.0, timestamp_ms=0)
+        # Update at t=50s
+        recon.apply("bid", 100.0, 1.5, timestamp_ms=50_000)
+        # At t=60s, max_age=30s → updated at 50s, still recent
+        n = recon.evict_stale(current_time_ms=60_000, max_age_ms=30_000)
+        assert n == 0
+        bids, _ = recon.top_n(20)
+        assert bids == [(100.0, 1.5)]
+
+    def test_evict_stale_clears_crossed_book(self) -> None:
+        """The original bug: a stale bid above a recent ask creates a crossed book."""
+        recon = OrderBookReconstructor()
+        # Stale bid placed 6 hours ago, no updates
+        recon.apply("bid", 100.0, 0.5, timestamp_ms=0)
+        # Recent ask (current price)
+        recon.apply("ask", 95.0, 1.0, timestamp_ms=6 * 3600 * 1000)
+        # Before eviction: best bid (100) > best ask (95) → CROSSED
+        bids, asks = recon.top_n(20)
+        assert bids[0][0] > asks[0][0]
+        # Evict
+        n = recon.evict_stale(current_time_ms=6 * 3600 * 1000, max_age_ms=30_000)
+        assert n == 1
+        # After: book is no longer crossed
+        bids, asks = recon.top_n(20)
+        assert bids == []
+        assert asks == [(95.0, 1.0)]
+
+    def test_evict_stale_both_sides(self) -> None:
+        recon = OrderBookReconstructor()
+        recon.apply("bid", 100.0, 1.0, timestamp_ms=0)
+        recon.apply("ask", 105.0, 1.0, timestamp_ms=0)
+        n = recon.evict_stale(current_time_ms=60_000, max_age_ms=30_000)
+        assert n == 2
+        assert recon.top_n(20) == ([], [])
+
+    def test_clear_resets_timestamps(self) -> None:
+        recon = OrderBookReconstructor()
+        recon.apply("bid", 100.0, 1.0, timestamp_ms=0)
+        recon.clear()
+        # After clear, no levels to evict even at t=infinity
+        n = recon.evict_stale(current_time_ms=10**12, max_age_ms=30_000)
+        assert n == 0
+
+    def test_apply_with_no_timestamp_preserves_old(self) -> None:
+        """If a row has no timestamp_ms, the level's old ts is kept
+        (and eventually evicts — which is the correct behavior)."""
+        recon = OrderBookReconstructor()
+        recon.apply("bid", 100.0, 1.0, timestamp_ms=0)
+        # Re-apply quantity without timestamp — old ts=0 stays
+        recon.apply("bid", 100.0, 2.0, timestamp_ms=None)
+        # At t=60s, evicts because ts is still 0
+        n = recon.evict_stale(current_time_ms=60_000, max_age_ms=30_000)
+        assert n == 1

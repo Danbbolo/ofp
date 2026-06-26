@@ -29,6 +29,10 @@ class OrderBookReconstructor:
     def __init__(self) -> None:
         self._bids: SortedDict[float, float] = SortedDict()
         self._asks: SortedDict[float, float] = SortedDict()
+        # Per-level last-update timestamp (ms).  Used to evict stale levels
+        # whose placer never sent an explicit cancel.  See evict_stale().
+        self._bids_ts: dict[float, int] = {}
+        self._asks_ts: dict[float, int] = {}
 
     # ------------------------------------------------------------------
     # Mutation
@@ -38,8 +42,11 @@ class OrderBookReconstructor:
         """Empty both sides of the book."""
         self._bids.clear()
         self._asks.clear()
+        self._bids_ts.clear()
+        self._asks_ts.clear()
 
-    def apply(self, side: str, price: float, quantity: float) -> None:
+    def apply(self, side: str, price: float, quantity: float,
+              timestamp_ms: int | None = None) -> None:
         """
         Apply a single price-level delta.
 
@@ -49,12 +56,64 @@ class OrderBookReconstructor:
         price : float
         quantity : float
             A value of ``0.0`` removes the level.
+        timestamp_ms : int, optional
+            Event time in ms.  If provided, recorded as the level's last
+            update time for stale-level eviction.  If ``None``, the previous
+            timestamp (if any) is kept — this lets callers that don't track
+            time still use the reconstructor without breaking eviction.
         """
         book = self._bids if side == "bid" else self._asks
+        book_ts = self._bids_ts if side == "bid" else self._asks_ts
         if quantity == 0.0:
             book.pop(price, None)
+            book_ts.pop(price, None)
         else:
             book[price] = quantity
+            if timestamp_ms is not None:
+                book_ts[price] = timestamp_ms
+
+    def evict_stale(self, current_time_ms: int, max_age_ms: int = 30_000) -> int:
+        """
+        Remove any level whose last update is older than ``max_age_ms``.
+
+        This handles the **stale-level** problem: a resting limit order
+        whose holder never explicitly cancels (qty=0) and never gets
+        traded against produces no further depth-update events.  Without
+        eviction, that level sits in the book forever, even when the
+        market moves far away, and creates crossed-book states.
+
+        The 30s default matches the Binance liquidation cadence for an
+        active perpetual — any level not updated in 30s is very likely
+        abandoned by its placer.
+
+        Parameters
+        ----------
+        current_time_ms : int
+            Current event time in ms.
+        max_age_ms : int
+            Maximum allowed age of a level's last update.
+
+        Returns
+        -------
+        int
+            Number of levels evicted (bids + asks).
+        """
+        n = 0
+        for price, ts in list(self._bids_ts.items()):
+            if current_time_ms - ts > max_age_ms:
+                # Only evict if quantity is still positive — a qty=0 update
+                # already removed the level, so it shouldn't be in _bids.
+                if self._bids.get(price, 0.0) > 0.0:
+                    self._bids.pop(price, None)
+                    n += 1
+                self._bids_ts.pop(price, None)
+        for price, ts in list(self._asks_ts.items()):
+            if current_time_ms - ts > max_age_ms:
+                if self._asks.get(price, 0.0) > 0.0:
+                    self._asks.pop(price, None)
+                    n += 1
+                self._asks_ts.pop(price, None)
+        return n
 
     def apply_snapshot(self, df: pd.DataFrame) -> None:
         """
@@ -161,4 +220,5 @@ class OrderBookReconstructor:
     def _apply_rows(self, df: pd.DataFrame) -> None:
         """Apply every row in *df* via ``self.apply()``."""
         for row in df.itertuples(index=False):
-            self.apply(row.side, row.price, row.quantity)
+            self.apply(row.side, row.price, row.quantity,
+                       timestamp_ms=int(row.event_time))
