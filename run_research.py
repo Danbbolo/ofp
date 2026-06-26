@@ -115,10 +115,19 @@ def _build_book_snapshots_multi(
                     # END of the previous second (cumulative book).
                     key = current_sec * 1000
                     if key not in snapshots:
+                        # Evict stale levels before snapshotting.  This
+                        # prevents ghost levels (bids/asks whose placer
+                        # never explicitly cancelled) from producing
+                        # crossed-book states when the market moves away.
+                        # See docs/orderbook_data_audit.md for details.
+                        recon.evict_stale(current_time_ms=key,
+                                           max_age_ms=30_000)
                         snapshots[key] = recon.top_n(20)
 
                 # Apply this delta to the running book.
-                recon.apply(side=sd[i], price=float(px[i]), quantity=float(qt[i]))
+                recon.apply(side=sd[i], price=float(px[i]),
+                             quantity=float(qt[i]),
+                             timestamp_ms=int(ev[i]))
                 current_sec = sec
             day_rows += m
 
@@ -126,6 +135,7 @@ def _build_book_snapshots_multi(
         if current_sec >= 0:
             key = current_sec * 1000
             if key not in snapshots:
+                recon.evict_stale(current_time_ms=key, max_age_ms=30_000)
                 snapshots[key] = recon.top_n(20)
 
         total_rows += day_rows
