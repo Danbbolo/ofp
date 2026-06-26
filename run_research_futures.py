@@ -40,16 +40,16 @@ run_research.OUTPUT_FILE = Path("data/research_dataset_futures.parquet")
 run_research._prepare_liq = _prepare_liq_futures  # monkey-patch
 
 if __name__ == "__main__":
-    # Parse date range from argv or default to single-day from the futures dir
+    # Parse date range from argv or default to all dates in raw_futures/
     if len(sys.argv) == 3:
         start, end = sys.argv[1], sys.argv[2]
     else:
-        # Find the only date in raw_futures/
+        # Find all dates in raw_futures/
         dates = sorted(p.name for p in Path("data/raw_futures").iterdir() if p.is_dir())
         if not dates:
             print("No dates in data/raw_futures/")
             sys.exit(1)
-        start = end = dates[0]
-        print(f"Using single day: {start}")
+        start, end = dates[0], dates[-1]
+        print(f"Using date range: {start} → {end}")
 
     run_research.main(start, end)
