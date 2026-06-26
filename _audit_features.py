@@ -33,7 +33,7 @@ stats_df = pd.DataFrame(stats)
 
 # Top features by zero percentage (likely useless)
 print("=== FEATURES WITH MOST ZEROS (likely useless) ===")
-print(stats_df.nlargest(15, "zeros_pct)[["feature", "zeros_pct", "mean", "std"]].to_string(index=False))
+print(stats_df.nlargest(15, "zeros_pct")[["feature", "zeros_pct", "mean", "std"]].to_string(index=False))
 print()
 
 # Bottom by zero percentage (always varying)
