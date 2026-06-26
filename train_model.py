@@ -18,15 +18,15 @@ import pandas as pd
 # Config
 # ---------------------------------------------------------------------------
 
-INPUT_FILE = "data/research_dataset_relabel.parquet"
-OUTPUT_FILE = "data/expectancy_table.csv"
+INPUT_FILE = "data/research_dataset_target.parquet"
+OUTPUT_FILE = "data/expectancy_table_target.csv"
 THRESHOLDS = [0.55, 0.58, 0.60, 0.62, 0.65, 0.68, 0.70, 0.75, 0.80]
 COST_PER_TRADE = 0.001  # 0.1 %
 
 LGB_PARAMS = {
     "objective": "binary",
     "num_leaves": 31,
-    "min_child_samples": 500,
+    "min_child_samples": 50,  # was 500, too aggressive for ~20k rows per pair
     "metric": "binary_logloss",
     "verbosity": -1,
     "seed": 42,
@@ -140,6 +140,7 @@ def main() -> None:
     # Train one model per (window_size, horizon)
     pairs = sorted(pair_splits.keys())
     all_rows: list[dict] = []
+    importance_dfs: list[pd.DataFrame] = []  # collect per-pair importances
 
     for i, (ws, hz) in enumerate(pairs):
         print(f"[{i + 1}/{len(pairs)}] W={ws}s  H={hz}s …", end=" ", flush=True)
@@ -153,16 +154,23 @@ def main() -> None:
         X_train, y_train = train[FEATURE_COLS], train["outcome_binary"]
         X_val, y_val = val[FEATURE_COLS], val["outcome_binary"]
 
-        model = lgb.LGBMClassifier(**LGB_PARAMS, n_estimators=1000)
+        model = lgb.LGBMClassifier(**LGB_PARAMS, n_estimators=2000)
         model.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],
             eval_metric="binary_logloss",
-            callbacks=[lgb.early_stopping(50), lgb.log_evaluation(0)],
+            callbacks=[lgb.early_stopping(20, verbose=False), lgb.log_evaluation(0)],
         )
 
         rows = _evaluate(model.booster_, test, ws, hz)
         all_rows.extend(rows)
+
+        # Collect feature importance (split)
+        imp = model.booster_.feature_importance(importance_type="split")
+        imp_df = pd.DataFrame({"feature": FEATURE_COLS, "importance": imp})
+        imp_df["window_size"] = ws
+        imp_df["horizon"] = hz
+        importance_dfs.append(imp_df)
 
         best = max(rows, key=lambda r: r["expectancy"])
         print(f"best θ={best['threshold']:.2f} exp={best['expectancy']:.6f} "
@@ -190,6 +198,14 @@ def main() -> None:
     print(f"  expectancy  = {best['expectancy']:.6f}")
     print(f"  win_rate    = {best['win_rate']:.4f}")
     print(f"  signals/day = {best['signals_per_day']:.1f}")
+
+    # Feature importance (average across all pairs)
+    if importance_dfs:
+        all_imp = pd.concat(importance_dfs, ignore_index=True)
+        avg_imp = all_imp.groupby("feature")["importance"].mean().sort_values(ascending=False)
+        print(f"\n=== TOP 10 FEATURES BY AVG IMPORTANCE (split) ===")
+        for rank, (feat, imp_val) in enumerate(avg_imp.head(10).items(), 1):
+            print(f"  {rank:2d}. {feat:40s}  {imp_val:.1f}")
 
 
 if __name__ == "__main__":
