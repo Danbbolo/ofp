@@ -134,7 +134,7 @@ for date_str, hhmm, direction, actual_pct in KNOWN_ENTRIES:
     move_str = "MOVE" if actual_had_move else "calm"
     pred_str = "PRED_MOVE" if model_says_move else "PRED_CALM"
     correct_str = "✓" if model_correct else "✗"
-    dir_str = f"dir={actual_dir:+d}" if actual_had_move else ""
+    dir_str = f"dir={int(actual_dir):+d}" if actual_had_move else ""
     print(f"  {date_str} {hhmm} {direction:4s} prob={prob:.3f} {pred_str:10s} "
           f"actual={move_str:4s} {dir_str:6s} {correct_str}  "
           f"pnl={actual_pct*100:+6.2f}%")
