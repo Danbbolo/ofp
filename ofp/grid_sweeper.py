@@ -134,7 +134,7 @@ class GridSweeper:
                     current_px = _price_at(win_end)
                     future_px = _price_at(future_ms)
 
-                    if current_px is None or future_px is None:
+                    if current_px is None or future_px is None or current_px <= 0 or future_px <= 0:
                         win_start += step_ms
                         continue
 
