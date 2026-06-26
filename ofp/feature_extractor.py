@@ -175,11 +175,11 @@ def extract_features(
     # ------------------------------------------------------------------
     liq_win = liq_df
 
-    # 21.  long_liq_vol  (side == "SELL" → long was liquidated)
-    long_liq_vol = float(liq_win.loc[liq_win["side"] == "SELL", "size"].sum())
+    # 21.  long_liq_vol  (side == "sell" → long was liquidated)
+    long_liq_vol = float(liq_win.loc[liq_win["side"].str.lower() == "sell", "size"].sum())
 
-    # 22.  short_liq_vol  (side == "BUY" → short was liquidated)
-    short_liq_vol = float(liq_win.loc[liq_win["side"] == "BUY", "size"].sum())
+    # 22.  short_liq_vol  (side == "buy" → short was liquidated)
+    short_liq_vol = float(liq_win.loc[liq_win["side"].str.lower() == "buy", "size"].sum())
 
     # 23.  net_liq  (short − long)
     net_liq = short_liq_vol - long_liq_vol
