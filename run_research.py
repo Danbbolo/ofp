@@ -48,6 +48,8 @@ def _prepare_trades(df: pd.DataFrame) -> pd.DataFrame:
     out["timestamp_ms"] = out["timestamp_ms"].astype("int64")
     out["price"] = out["price"].astype(float)
     out["size"] = out["size"].astype(float)
+    # Drop zero/negative-price trades (liquidation prints, bad data)
+    out = out[out["price"] > 0].reset_index(drop=True)
     return out[["timestamp_ms", "price", "size", "is_buyer_maker"]]
 
 
