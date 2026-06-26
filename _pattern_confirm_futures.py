@@ -84,7 +84,10 @@ for date_str, hhmm, direction, actual_pct in KNOWN_ENTRIES:
     hi = int(np.searchsorted(ts, win_end, side="left"))
     if hi <= lo:
         results.append({"date": date_str, "time": hhmm, "direction": direction,
-                        "actual_pct": actual_pct, "is_win": False, "in_data": False})
+                        "actual_pct": actual_pct, "is_win": False, "in_data": False,
+                        "trader_pnl": 0, "n_trades": 0, "cvd_momentum": 0,
+                        "large_trade_count": 0, "long_liq": 0, "short_liq": 0,
+                        "total_liq": 0, "buy_vol": 0, "sell_vol": 0})
         continue
     win = trades.iloc[lo:hi]
     bm = win["is_buyer_maker"].astype(bool).values
