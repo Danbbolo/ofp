@@ -25,7 +25,7 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 
 API_KEY = "2845d16a0479fc66dc89c01eccc8a3d3434e199828de1c8f168dacfca4a0e0ec"
-EXCHANGE = chd.exchanges.BINANCE_SPOT
+EXCHANGE = chd.exchanges.BINANCE_FUTURES
 SYMBOL = "BTCUSDT"
 OUTPUT_ROOT = Path("data/raw")
 MAX_RETRIES = 2
