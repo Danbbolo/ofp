@@ -34,7 +34,7 @@ LGB_PARAMS = {
 
 FEATURE_COLS: list[str] = []  # filled after loading
 META_COLS = {"window_size", "horizon", "window_end_ms"}
-LABEL_COLS = {"outcome_binary", "outcome_pct"}
+LABEL_COLS = {"outcome_binary", "outcome_pct", "target_hit_1pct", "mae_pct"}
 
 
 # ---------------------------------------------------------------------------
