@@ -91,19 +91,20 @@ A clean-room backtest engine + ML pipeline in Python for BTCUSDT Perpetual Futur
 
 **Result:** Negative-spread rows 7.7% → ~0%. OOS expectancy +0.35% → +0.82% (W=60s, H=3600s, θ=0.6).
 
-## DEVIATIONS from blueprint that I introduced (need user decision)
+## DEVIATIONS from blueprint that are NOW the canonical spec (per user, 2026-06-26)
 
-| Aspect | Blueprint | What I did | Status |
-|--------|-----------|-----------|--------|
-| Features per zoom | 30 (or "28" typo) | 36 (added 6) | ❌ Need to remove or keep |
-| Total features | 90 (or "84" typo) | 108 | ❌ |
-| Horizons | [300, 900, 1800] | [1800, 3600, 7200, 14400] | ❌ Need to revert or keep |
-| LightGBM min_child_samples | 500 | 50 | ❌ Reverted (50 was needed for fit) |
-| Target labels | time-based (per blueprint 4.2) | target-based (added relabel_target.py) | ❌ Need decision |
-| 6 added features | none | cvd, cvd_momentum, large_trade_count, trade_size_skew, wall_lifecycle, volume_profile_entropy | ❌ |
-| Server | Hetzner (32GB, 8 vCPU) | Azure (62GB, 16 cores) | OK (Hetzner is off) |
+The original blueprint is the historical design. The following deviations are **intentional evolution**, confirmed by user as the new canonical OFP spec:
 
-**The 6 added features I need decision on:**
+| Aspect | Blueprint | Current canonical (V10) | Why |
+|--------|-----------|--------------------------|-----|
+| Features per zoom | 30 (or "28" typo) | **36** | Added 6 advanced orderflow features |
+| Total features | 90 (or "84" typo) | **108** | Same |
+| Horizons | [300, 900, 1800] | **[1800, 3600, 7200, 14400]** (30m, 1h, 2h, 4h) | Macrostructure holds, not short-term |
+| LightGBM min_child_samples | 500 | **50** | 500 was too aggressive for ~20K rows per pair |
+| Target labels | time-based | **target-based** (`relabel_target.py`) | Time-based returns were tiny; target-based = +1% hit before -1% stop in 24h |
+| Server | Hetzner (32GB, 8 vCPU) | **Azure (62GB, 16 cores)** | Hetzner decommissioned |
+
+**The 6 added features (now canonical):**
 - `cvd` (cumulative volume delta)
 - `cvd_momentum` (rate of change of CVD)
 - `large_trade_count` (count of large trades, not just net)
@@ -122,11 +123,13 @@ A clean-room backtest engine + ML pipeline in Python for BTCUSDT Perpetual Futur
 
 ## Open questions for user
 
-1. **Remove 6 added features** to match blueprint (back to 90 features)? Or keep them?
-2. **Revert horizons** to [300, 900, 1800] (5m, 15m, 30m) as per blueprint? Or keep [1800, 3600, 7200, 14400] (30m, 1h, 2h, 4h)?
-3. **Revert min_child_samples** to 500 (blueprint) or keep 50 (which got the model to fit)?
-4. **Revert targets** to time-based (blueprint) or keep target-based (relabel_target.py)?
-5. **Re-run sweep on Azure** with current V10 code (which has all deviations)?
+**None** — the deviations are confirmed as the new canonical spec. Proceeding with V10 as the baseline.
+
+## Next steps (OFP-only)
+1. Re-run sweep on Azure with V10 code (which has all canonical deviations)
+2. Run `_trace_target.py` on resulting dataset
+3. 60+ day sweep for robust validation
+4. Walk-forward test (rolling retrain)
 
 ## Hard rules (from blueprint + my prior notes, OFP-only)
 - No `try/except` blocks in data loading — let it crash on bad data
