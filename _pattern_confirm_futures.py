@@ -121,9 +121,9 @@ for date_str, hhmm, direction, actual_pct in KNOWN_ENTRIES:
     results.append({
         "date": date_str, "time": hhmm, "direction": direction,
         "actual_pct": actual_pct, "trader_pnl": trader_pnl, "is_win": is_win,
-        "in_data": True, "n_trades": len(sz),
+        "in_data": True, "n_trades": int(len(sz)),
         "buy_vol": buy_vol, "sell_vol": sell_vol,
-        "cvd_momentum": cvd_mom, "large_trade_count": n_large,
+        "cvd_momentum": cvd_mom, "large_trade_count": int(n_large),
         "long_liq": long_liq_vol, "short_liq": short_liq_vol, "total_liq": total_liq,
     })
 
