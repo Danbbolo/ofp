@@ -110,6 +110,13 @@ class GridSweeper:
             d24_sec = unique_secs
         prior_24h_cache = (d24_sec, d24_low, d24_high)
 
+        # ----------------------------------------------------------------
+        # Build the sorted book-snapshot-key array ONCE per sweep.
+        # extract_multi_zoom_features would otherwise re-sort 86K+ keys
+        # on every window (O(n log n) per row).  Pass it in as snap_ts_cache.
+        # ----------------------------------------------------------------
+        snap_ts_cache = np.array(sorted(book_snapshots.keys()), dtype=np.int64)
+
         def _price_at(target_ms: int) -> float | None:
             idx = int(np.searchsorted(trade_ts, target_ms, side="left"))
             if idx >= len(trade_ts):
@@ -121,7 +128,11 @@ class GridSweeper:
 
         for window_sec in self._window_sizes_sec:
             micro_ms = window_sec * 1000
-            step_ms = micro_ms // 2
+            # Non-overlapping windows: next window starts where this one ends.
+            # Previous step_ms = micro_ms // 2 caused 50% overlap, inflating
+            # sample count ~2x and creating autocorrelated rows that the
+            # model could memorize. See Phase 1 validation fix.
+            step_ms = micro_ms
 
             for horizon_sec in self._horizons_sec:
                 horizon_ms = horizon_sec * 1000
@@ -149,6 +160,7 @@ class GridSweeper:
                         rolling_stats_per_zoom=rolling_stats_per_zoom,
                         current_price=current_px,
                         prior_24h_cache=prior_24h_cache,
+                        snap_ts_cache=snap_ts_cache,
                     )
 
                     outcome_pct = (future_px - current_px) / current_px
