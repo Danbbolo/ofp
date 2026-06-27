@@ -338,6 +338,40 @@ def main() -> None:
     print(f"  cost:              {COST_PER_TRADE * 10_000:.0f} bps")
     print(f"  split:             chronological 70/15/15")
 
+    # ------------------------------------------------------------------
+    # Extract features ONCE — they're identical across horizons.
+    # Only the labels differ per horizon.
+    # ------------------------------------------------------------------
+    # Try loading from existing train_v2 feature cache first
+    features_df: pl.DataFrame | None = None
+
+    if skip_extraction and FEATURE_CACHE.exists():
+        print(f"\nLoading cached features from {FEATURE_CACHE} …")
+        features_df = pl.read_parquet(str(FEATURE_CACHE))
+        print(f"  {len(features_df):,} rows loaded")
+    else:
+        # Build features using the first available magnitude file
+        # (features don't depend on labels, just on volume bars + order book)
+        for horizon_s in HORIZONS:
+            mag_file = Path(f"data/research_dataset_v2_mag_{horizon_s}s.parquet")
+            if mag_file.exists():
+                features_df = build_feature_dataset(mag_file)
+                break
+
+        if features_df is None:
+            # Fall back to old magnitude file
+            old_mag = Path("data/research_dataset_v2_magnitude.parquet")
+            if old_mag.exists():
+                features_df = build_feature_dataset(old_mag)
+            else:
+                print("ERROR: no magnitude dataset found. Run relabel_magnitude first.")
+                sys.exit(1)
+
+    # Strip label columns from features — we'll join fresh labels per horizon
+    feature_only_cols = [c for c in features_df.columns if c not in ("label", "max_return_bps", "max_drawdown_bps")]
+    features_base = features_df.select(feature_only_cols)
+    print(f"\n  Features base: {len(features_base):,} rows, {len(feature_only_cols)} cols")
+
     all_results: list[HorizonResult] = []
 
     for horizon_s in HORIZONS:
@@ -347,10 +381,11 @@ def main() -> None:
             print(f"\n  *** {mag_file} not found — run relabel_magnitude with --horizon {horizon_s} first ***")
             continue
 
-        # Load features
-        df = load_or_build_features(mag_file, skip_extraction=skip_extraction)
+        # Load labels for this horizon and join with features
+        labels = pl.read_parquet(str(mag_file)).select([TIMESTAMP_COL, LABEL_COL, "max_return_bps", "max_drawdown_bps"])
+        df = features_base.join(labels, on=TIMESTAMP_COL, how="inner")
 
-        print(f"\n  Dataset: {len(df):,} rows, {len(df.columns)} cols")
+        print(f"\n  Dataset ({horizon_s}s): {len(df):,} rows, {len(df.columns)} cols")
         print(f"  Label distribution:")
         for label_val, count in df.group_by(LABEL_COL).agg(pl.len()).sort(LABEL_COL).iter_rows():
             print(f"    Label {label_val}: {count:,}")
