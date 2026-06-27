@@ -290,7 +290,12 @@ def extract_features(
     ofi, book_delta = _compute_ofi_and_book_delta(snapshots, bar_close_ts)
 
     # === 4. trade_arrival_rate ===
-    trade_arrival_rate = np.where(duration_ms > 0, num_trades / duration_ms, 0.0)
+    # Suppress divide-by-zero warning — np.where guards the result,
+    # but numpy still evaluates the division before selecting.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        trade_arrival_rate = np.where(
+            duration_ms > 0, num_trades / duration_ms, 0.0
+        )
 
     # === 5. liq_volume ===
     print(f"  Computing liquidation volume …", flush=True)
