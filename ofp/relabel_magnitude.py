@@ -255,10 +255,11 @@ def relabel_bars(
 def main() -> None:
     """CLI entry: build volume bars, relabel, save, print distribution."""
     # Parse args
-    # Usage: python -m ofp.relabel_magnitude [start_date] [end_date] [--threshold N]
+    # Usage: python -m ofp.relabel_magnitude [start_date] [end_date] [--threshold N] [--horizon SECONDS]
     start_date = None
     end_date = None
     threshold = 50.0
+    horizon_s = 86400  # default 24h
 
     args = sys.argv[1:]
     dates = [a for a in args if not a.startswith("--")]
@@ -272,6 +273,11 @@ def main() -> None:
         if idx + 1 < len(args):
             threshold = float(args[idx + 1])
 
+    if "--horizon" in args:
+        idx = args.index("--horizon")
+        if idx + 1 < len(args):
+            horizon_s = int(args[idx + 1])
+
     # Default to all dates in raw_futures if not specified
     if start_date is None:
         dates_avail = sorted(p.name for p in RAW_DIR.iterdir() if p.is_dir())
@@ -283,12 +289,16 @@ def main() -> None:
     elif end_date is None:
         end_date = start_date
 
+    horizon_ms = horizon_s * 1000
+    output_file = Path(f"data/research_dataset_v2_mag_{horizon_s}s.parquet")
+
     print(f"=== MAGNITUDE RELABEL ===")
     print(f"  Date range: {start_date} → {end_date}")
     print(f"  Volume threshold: {threshold} BTC")
     print(f"  Target: +{TARGET_BPS} bps (+1%)")
     print(f"  Stop:   -{STOP_BPS} bps (-1%)")
-    print(f"  Horizon: {MAX_HORIZON_MS / 3600000:.0f}h")
+    print(f"  Horizon: {horizon_s / 3600:.0f}h ({horizon_s}s)")
+    print(f"  Output: {output_file}")
     print()
 
     # Build volume bars for the date range
@@ -320,7 +330,7 @@ def main() -> None:
     print()
 
     # Relabel
-    bars = relabel_bars(bars, raw_dir=RAW_DIR)
+    bars = relabel_bars(bars, raw_dir=RAW_DIR, max_horizon_ms=horizon_ms)
 
     # Print label distribution
     print()
@@ -345,11 +355,11 @@ def main() -> None:
         print(f"  Base rate: N/A (no tradeable bars)")
 
     # Save
-    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    bars.write_parquet(str(OUTPUT_FILE))
-    size_mb = OUTPUT_FILE.stat().st_size / (1024 * 1024)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    bars.write_parquet(str(output_file))
+    size_mb = output_file.stat().st_size / (1024 * 1024)
     print()
-    print(f"Saved {len(bars):,} rows to {OUTPUT_FILE} ({size_mb:.2f} MB)")
+    print(f"Saved {len(bars):,} rows to {output_file} ({size_mb:.2f} MB)")
 
 
 if __name__ == "__main__":

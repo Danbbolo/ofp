@@ -243,5 +243,39 @@ def test_relabel_bars_pipeline(tmp_path):
     assert labels[2] == LABEL_STOP, f"Bar 2: expected label=0, got {labels[2]}"
 
 
+# ---------------------------------------------------------------------------
+# Test 8: Horizon parameter — short horizon misses, long horizon hits
+# ---------------------------------------------------------------------------
+
+def test_short_horizon_no_trade():
+    """With a 1-second horizon, price doesn't reach ±1% → label=2."""
+    entry_px = 100.0
+    # Price rises slowly: 100 → 100.3 → 100.6 → 101.0 (target at 101)
+    # But with 1s horizon (1000ms), only 1 trade after entry is in window
+    prices = [entry_px, 100.1, 100.3, 100.6, 101.0]
+    ts, px = make_trades(prices, step_ms=2_000)  # 2s between trades
+
+    # 1s horizon = 1000ms → only entry trade in window
+    label, mr, md = compute_magnitude_label(
+        ts, px, bar_close_ms=ts[0], bar_close_px=entry_px,
+        max_horizon_ms=1_000,
+    )
+    assert label == LABEL_NO_TRADE, f"Expected label=2 (short horizon), got {label}"
+
+
+def test_long_horizon_target_hit():
+    """With a 10s horizon, same price series hits target → label=1."""
+    entry_px = 100.0
+    prices = [entry_px, 100.1, 100.3, 100.6, 101.0]
+    ts, px = make_trades(prices, step_ms=2_000)
+
+    # 10s horizon = 10000ms → enough time for target
+    label, mr, md = compute_magnitude_label(
+        ts, px, bar_close_ms=ts[0], bar_close_px=entry_px,
+        max_horizon_ms=10_000,
+    )
+    assert label == LABEL_TARGET, f"Expected label=1 (long horizon), got {label}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
