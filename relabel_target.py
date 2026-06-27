@@ -26,14 +26,20 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-RAW_DIR = Path("data/raw")
-INPUT_FILE = Path("data/research_dataset.parquet")
-OUTPUT_FILE = Path("data/research_dataset_target.parquet")
-
 # Target-based parameters
 TARGET_PCT = 0.01       # +1% take-profit
 STOP_PCT = 0.01        # -1% stop-loss (symmetric 1:1 RR)
-MAX_HORIZON_SEC = 4 * 3600  # 4 hours — if neither hit, mark as time-based exit
+MAX_HORIZON_SEC = 24 * 3600  # 24 hours — if neither hit, mark as time-based exit
+
+# Configurable via command line: python relabel_target.py <raw_dir> <input_file> <output_file>
+if len(sys.argv) == 4:
+    RAW_DIR = Path(sys.argv[1])
+    INPUT_FILE = Path(sys.argv[2])
+    OUTPUT_FILE = Path(sys.argv[3])
+else:
+    RAW_DIR = Path("data/raw")
+    INPUT_FILE = Path("data/research_dataset.parquet")
+    OUTPUT_FILE = Path("data/research_dataset_target.parquet")
 
 
 def _load_trades_for_range(start_ms: int, end_ms: int) -> pd.DataFrame:
