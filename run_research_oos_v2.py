@@ -26,9 +26,9 @@ run_research.RAW_DIR = Path("data/raw_futures_oos")
 run_research.OUTPUT_FILE = Path("data/research_dataset_oos.parquet")
 run_research._prepare_liq = _prepare_liq_futures
 
-# Smaller sweep for OOS
-run_research.WINDOW_SIZES_SEC = [60]
-run_research.HORIZONS_SEC = [1800, 3600]
+# Use full V10 config (same as IS) — W=[60,120,180], H=[1800,3600,7200,14400]
+# Previous version overrode to W=[60], H=[1800,3600] which was a bug:
+# OOS had 1x2=2 combos instead of 3x4=12, making it incompatible with IS training.
 
 if __name__ == "__main__":
     if len(sys.argv) == 3:
