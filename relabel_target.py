@@ -57,6 +57,8 @@ def _load_trades_for_range(start_ms: int, end_ms: int) -> pd.DataFrame:
             df["timestamp_ms"] = df["timestamp_ms"].astype("int64")
             df["price"] = df["price"].astype(float)
             df["size"] = df["size"].astype(float)
+            # Drop zero/negative-price trades (liquidation prints, bad data)
+            df = df[df["price"] > 0].reset_index(drop=True)
             chunks.append(df[["timestamp_ms", "price"]])
         d += timedelta(days=1)
     if not chunks:
