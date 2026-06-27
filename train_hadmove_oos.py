@@ -116,7 +116,7 @@ for (ws, hz), grp_is in df_is.groupby(["window_size", "horizon"], sort=True):
     y_pct = grp_oos["outcome_pct"].values
     n_days_oos = (grp_oos["window_end_ms"].max() - grp_oos["window_end_ms"].min()) / 86_400_000 + 1
 
-    probs = model.predict(X_oos)
+    probs = model.predict_proba(X_oos)[:, 1]
 
     print(f"    OOS: {len(grp_oos)} rows, {n_days_oos:.1f} days")
     print(f"    OOS base rate: {y_true.mean():.3f}")
