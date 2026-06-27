@@ -10,6 +10,7 @@ Params: min_child_samples=50, num_leaves=31, early_stopping=20
 Chronological 70/15/15 split within IS for train/val
 Threshold: θ=0.6
 """
+import sys
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
@@ -17,7 +18,7 @@ import pandas as pd
 IS_FILE = "data/research_dataset_futures_hadmove.parquet"
 OOS_FILE = "data/research_dataset_oos_hadmove.parquet"
 OUTPUT_FILE = "data/expectancy_hadmove_oos.csv"
-THRESHOLDS = [0.50, 0.55, 0.60, 0.65, 0.70]
+THRESHOLDS = [0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70]
 COST_PER_TRADE = 0.001  # 0.1%
 
 LGB_PARAMS = {
@@ -144,6 +145,24 @@ for (ws, hz), grp_is in df_is.groupby(["window_size", "horizon"], sort=True):
         })
 
 # Save results
+if len(all_rows) == 0:
+    print("\n*** NO SIGNALS generated at any threshold — model has zero discriminative power ***")
+    # Still print val prob std and feature importance
+    if importance_dfs:
+        all_imp = pd.concat(importance_dfs, ignore_index=True)
+        avg_imp = all_imp.groupby("feature")["importance"].mean().sort_values(ascending=False)
+        print(f"\n=== TOP 5 FEATURES BY AVG IMPORTANCE ===")
+        for rank, (feat, imp_val) in enumerate(avg_imp.head(5).items(), 1):
+            print(f"  {rank}. {feat:40s}  {imp_val:.1f}")
+    print("\n" + "=" * 60)
+    print("=== VALIDATION PROBABILITY STD (signal check) ===")
+    print("=" * 60)
+    for (ws, hz), std in sorted(val_prob_stds.items()):
+        flag = "  <-- NO SIGNAL" if std < 0.05 else ""
+        print(f"  W={ws} H={hz}: val prob std = {std:.4f}{flag}")
+    print("\n=== OOS SUMMARY: NO SIGNALS AT ANY THRESHOLD ===")
+    sys.exit(0)
+
 table = pd.DataFrame(all_rows).sort_values("expectancy", ascending=False)
 table.to_csv(OUTPUT_FILE, index=False)
 print(f"\nSaved {len(table)} rows to {OUTPUT_FILE}")
