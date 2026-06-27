@@ -187,13 +187,14 @@ def main() -> None:
     # Verification: sum of bar volumes == total volume in raw data
     raw = pl.read_parquet(trades_path)
     if "quantity" in raw.columns:
-        total_raw = raw["quantity"].cast(pl.Float64).filter(
-            pl.col("price").cast(pl.Float64) > 0
-        ).sum()
-    else:
-        total_raw = raw["size"].cast(pl.Float64).filter(
-            pl.col("price").cast(pl.Float64) > 0
-        ).sum()
+        raw = raw.rename({"quantity": "size", "trade_time": "timestamp_ms"})
+    raw = raw.with_columns([
+        pl.col("price").cast(pl.Float64),
+        pl.col("size").cast(pl.Float64),
+    ])
+    raw = raw.filter(pl.col("price") > 0)
+    raw = raw.filter(pl.col("size") > 0)
+    total_raw = float(raw["size"].sum())
 
     total_bars = bars["volume"].sum()
     print(f"=== VERIFICATION ===")
