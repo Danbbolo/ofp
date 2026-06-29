@@ -18,8 +18,8 @@ from ofp.relabel_magnitude import (
     LABEL_TARGET,
     LABEL_STOP,
     LABEL_NO_TRADE,
-    TARGET_BPS,
-    STOP_BPS,
+    DEFAULT_TARGET_BPS,
+    DEFAULT_STOP_BPS,
     MAX_HORIZON_MS,
 )
 
@@ -275,6 +275,33 @@ def test_long_horizon_target_hit():
         max_horizon_ms=10_000,
     )
     assert label == LABEL_TARGET, f"Expected label=1 (long horizon), got {label}"
+
+
+# ---------------------------------------------------------------------------
+# Test 9: target_bps parameter — lower threshold hits more often
+# ---------------------------------------------------------------------------
+
+def test_lower_target_bps_hits_earlier():
+    """With ±50 bps (0.5%) instead of ±100 bps (1%), target should hit
+    when it wouldn't at the higher threshold."""
+    entry_px = 100.0
+    # Price rises to 100.6 (+60 bps) — hits 50bps target but not 100bps
+    prices = [entry_px, 100.3, 100.6, 100.4, 100.2]
+    ts, px = make_trades(prices, step_ms=1_000)
+
+    # At 50 bps: target = 100.5, stop = 99.5 → target hit at 100.6
+    label_50, _, _ = compute_magnitude_label(
+        ts, px, bar_close_ms=ts[0], bar_close_px=entry_px,
+        target_bps=50, stop_bps=50, max_horizon_ms=10_000,
+    )
+    assert label_50 == LABEL_TARGET, f"Expected label=1 at 50bps, got {label_50}"
+
+    # At 100 bps: target = 101.0, stop = 99.0 → neither hit → label=2
+    label_100, _, _ = compute_magnitude_label(
+        ts, px, bar_close_ms=ts[0], bar_close_px=entry_px,
+        target_bps=100, stop_bps=100, max_horizon_ms=10_000,
+    )
+    assert label_100 == LABEL_NO_TRADE, f"Expected label=2 at 100bps, got {label_100}"
 
 
 if __name__ == "__main__":

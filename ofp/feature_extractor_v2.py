@@ -1,7 +1,7 @@
 """
 feature_extractor_v2.py — Microstructure feature extractor for volume bars.
 
-Extracts 10 features at each volume bar close. No time-based aggregates.
+Extracts 15 features at each volume bar close. No time-based aggregates.
 Only microstructure mechanics.
 
 Base Features (per bar):
@@ -20,6 +20,13 @@ Interaction Features:
   8. liq_x_vpin:         liq_volume * vpin
   9. vpin_x_duration:    vpin * duration_ms
  10. liq_x_return:       liq_volume * bar_return
+
+Extended Features (from V10 engine):
+ 11. cvd_momentum: Rate of change of cumulative volume delta over last 10 bars.
+ 12. wall_lifecycle: Large orders (>=5 BTC) appearing minus disappearing, last 10 bars.
+ 13. volume_profile_entropy: Shannon entropy of volume across price levels, last 50 bars.
+ 14. large_trade_count: Trades with quantity >= 1 BTC in current bar.
+ 15. macro_trade_size_skew: Skewness of trade sizes in last 50 bars.
 
 All division is guarded: if denominator == 0, return 0. No NaN, no Inf.
 
@@ -235,6 +242,227 @@ def _compute_liq_volume(
 
 
 # ---------------------------------------------------------------------------
+# CVD momentum
+# ---------------------------------------------------------------------------
+
+def _compute_cvd_momentum(
+    buy_vol: np.ndarray,
+    sell_vol: np.ndarray,
+    lookback: int = 10,
+) -> np.ndarray:
+    """
+    Rate of change of cumulative volume delta over last 10 bars.
+
+    Formula: (current_cvd - cvd_10_bars_ago) / cvd_10_bars_ago
+    Guard: if cvd_10_bars_ago == 0, return 0.
+    """
+    n = len(buy_vol)
+    cvd = np.cumsum(buy_vol - sell_vol)
+    cvd_momentum = np.zeros(n, dtype=np.float64)
+    for i in range(lookback, n):
+        prev = cvd[i - lookback]
+        if abs(prev) > 1e-9:
+            cvd_momentum[i] = (cvd[i] - prev) / abs(prev)
+    return cvd_momentum
+
+
+# ---------------------------------------------------------------------------
+# Wall lifecycle
+# ---------------------------------------------------------------------------
+
+def _compute_wall_lifecycle(
+    snapshots: dict[int, tuple[list, list]],
+    bar_close_ts: list[int],
+    wall_threshold: float = 5.0,
+    lookback: int = 10,
+) -> np.ndarray:
+    """
+    Track large orders (>= wall_threshold BTC) in top 20 levels.
+
+    For each bar, count walls that appeared minus walls that disappeared
+    over the last `lookback` bars. Positive = walls building (support),
+    negative = walls collapsing (resistance breaking).
+    """
+    n = len(bar_close_ts)
+    wall_lifecycle = np.zeros(n, dtype=np.float64)
+
+    prev_walls: set[float] = set()
+    appeared_counts = np.zeros(n, dtype=np.float64)
+    disappeared_counts = np.zeros(n, dtype=np.float64)
+
+    for i, ts in enumerate(bar_close_ts):
+        snap = snapshots.get(ts)
+        if snap is None:
+            continue
+
+        bids, asks = snap
+        curr_walls: set[float] = set()
+        for price, size in bids:
+            if size >= wall_threshold:
+                curr_walls.add(round(price, 2))
+        for price, size in asks:
+            if size >= wall_threshold:
+                curr_walls.add(round(price, 2))
+
+        appeared_counts[i] = float(len(curr_walls - prev_walls))
+        disappeared_counts[i] = float(len(prev_walls - curr_walls))
+        prev_walls = curr_walls
+
+    # Rolling sum over last `lookback` bars
+    for i in range(n):
+        start = max(0, i - lookback + 1)
+        wall_lifecycle[i] = float(
+            appeared_counts[start : i + 1].sum()
+            - disappeared_counts[start : i + 1].sum()
+        )
+
+    return wall_lifecycle
+
+
+# ---------------------------------------------------------------------------
+# Trade-level features (volume profile entropy, large trade count, size skew)
+# ---------------------------------------------------------------------------
+
+def _load_trades_for_features(
+    raw_dir: Path,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """
+    Load trades for a date and return sorted (ts, price, quantity) arrays.
+    Returns None if no trades file.
+    """
+    trades_path = raw_dir / "trades.parquet"
+    if not trades_path.exists():
+        return None
+
+    df = pl.read_parquet(str(trades_path))
+    if "trade_time" in df.columns:
+        df = df.rename({"trade_time": "timestamp_ms", "quantity": "size"})
+    df = df.with_columns([
+        pl.col("timestamp_ms").cast(pl.Int64),
+        pl.col("price").cast(pl.Float64),
+        pl.col("size").cast(pl.Float64),
+    ])
+    df = df.filter(pl.col("price") > 0)
+    df = df.sort("timestamp_ms")
+
+    return (
+        df["timestamp_ms"].to_numpy(),
+        df["price"].to_numpy(),
+        df["size"].to_numpy(),
+    )
+
+
+def _compute_volume_profile_entropy(
+    trades_ts: np.ndarray,
+    trades_px: np.ndarray,
+    trades_qty: np.ndarray,
+    bar_close_ts: np.ndarray,
+    bar_start_ts: np.ndarray,
+    lookback: int = 50,
+) -> np.ndarray:
+    """
+    Shannon entropy of volume distribution across price levels in last 50 bars.
+
+    Low entropy = volume concentrated at specific prices (breakout setup).
+    High entropy = volume scattered (chop).
+    """
+    n = len(bar_close_ts)
+    entropy = np.zeros(n, dtype=np.float64)
+
+    for i in range(n):
+        window_start = bar_start_ts[max(0, i - lookback + 1)]
+        window_end = bar_close_ts[i]
+
+        lo = int(np.searchsorted(trades_ts, window_start, side="left"))
+        hi = int(np.searchsorted(trades_ts, window_end, side="right"))
+
+        if hi <= lo:
+            continue
+
+        window_qty = trades_qty[lo:hi]
+        total_vol = float(window_qty.sum())
+        if total_vol <= 0:
+            continue
+
+        # Group by price (round to 0.1 to avoid float noise)
+        rounded_px = np.round(trades_px[lo:hi], 1)
+        unique_px, inverse = np.unique(rounded_px, return_inverse=True)
+        vol_at_price = np.zeros(len(unique_px), dtype=np.float64)
+        np.add.at(vol_at_price, inverse, window_qty)
+
+        # Entropy: -sum(p_i * log(p_i))
+        p = vol_at_price / total_vol
+        p = p[p > 0]
+        entropy[i] = float(-np.sum(p * np.log(p)))
+
+    return entropy
+
+
+def _compute_large_trade_count(
+    trades_ts: np.ndarray,
+    trades_qty: np.ndarray,
+    bar_close_ts: np.ndarray,
+    bar_start_ts: np.ndarray,
+    threshold: float = 1.0,
+) -> np.ndarray:
+    """
+    Number of trades with quantity >= threshold BTC in the current bar.
+    Proxy for institutional footprints.
+    """
+    n = len(bar_close_ts)
+    large_count = np.zeros(n, dtype=np.float64)
+
+    for i in range(n):
+        lo = int(np.searchsorted(trades_ts, bar_start_ts[i], side="left"))
+        hi = int(np.searchsorted(trades_ts, bar_close_ts[i], side="right"))
+
+        if hi <= lo:
+            continue
+
+        large_count[i] = float(np.sum(trades_qty[lo:hi] >= threshold))
+
+    return large_count
+
+
+def _compute_macro_trade_size_skew(
+    trades_ts: np.ndarray,
+    trades_qty: np.ndarray,
+    bar_close_ts: np.ndarray,
+    bar_start_ts: np.ndarray,
+    lookback: int = 50,
+) -> np.ndarray:
+    """
+    Skewness of trade sizes in last 50 bars.
+
+    Positive skew = a few large trades dominating (informed flow).
+    Negative skew = many small trades (retail flow).
+    """
+    n = len(bar_close_ts)
+    skew = np.zeros(n, dtype=np.float64)
+
+    for i in range(n):
+        window_start = bar_start_ts[max(0, i - lookback + 1)]
+        window_end = bar_close_ts[i]
+
+        lo = int(np.searchsorted(trades_ts, window_start, side="left"))
+        hi = int(np.searchsorted(trades_ts, window_end, side="right"))
+
+        if hi - lo < 3:  # need at least 3 samples
+            continue
+
+        sizes = trades_qty[lo:hi]
+        mean = float(sizes.mean())
+        std = float(sizes.std())
+
+        if std < 1e-9:
+            continue
+
+        skew[i] = float(np.mean((sizes - mean) ** 3) / (std ** 3))
+
+    return skew
+
+
+# ---------------------------------------------------------------------------
 # Main extraction
 # ---------------------------------------------------------------------------
 
@@ -243,19 +471,19 @@ def extract_features(
     raw_dir: str | Path,
 ) -> pl.DataFrame:
     """
-    Extract 10 microstructure features from volume bars.
+    Extract 15 microstructure features from volume bars.
 
     Parameters
     ----------
     bars : pl.DataFrame
         Volume bars from volume_clock.build_volume_bars().
     raw_dir : str | Path
-        Directory containing book.parquet and liq.parquet for the date.
+        Directory containing book.parquet, liq.parquet, and trades.parquet.
 
     Returns
     -------
     pl.DataFrame
-        timestamp_ms + 10 feature columns.
+        timestamp_ms + 15 feature columns.
     """
     raw_dir = Path(raw_dir)
     book_path = raw_dir / "book.parquet"
@@ -315,6 +543,36 @@ def extract_features(
     vpin_x_duration = vpin * duration_ms
     liq_x_return = liq_volume * bar_return
 
+    # === 11. CVD momentum (10-bar lookback) ===
+    print(f"  Computing CVD momentum …", flush=True)
+    cvd_momentum = _compute_cvd_momentum(buy_vol, sell_vol, lookback=10)
+
+    # === 12. Wall lifecycle (10-bar lookback, >= 5 BTC walls) ===
+    print(f"  Computing wall lifecycle …", flush=True)
+    wall_lifecycle = _compute_wall_lifecycle(snapshots, bar_close_ts)
+
+    # === 13-15. Trade-level features (entropy, large count, size skew) ===
+    print(f"  Computing trade-level features …", flush=True)
+    trades_data = _load_trades_for_features(raw_dir)
+    if trades_data is not None:
+        t_ts, t_px, t_qty = trades_data
+        bar_close_arr = np.array(bar_close_ts, dtype=np.int64)
+        bar_start_arr = np.array(bar_start_ts, dtype=np.int64)
+
+        volume_profile_entropy = _compute_volume_profile_entropy(
+            t_ts, t_px, t_qty, bar_close_arr, bar_start_arr, lookback=50,
+        )
+        large_trade_count = _compute_large_trade_count(
+            t_ts, t_qty, bar_close_arr, bar_start_arr, threshold=1.0,
+        )
+        macro_trade_size_skew = _compute_macro_trade_size_skew(
+            t_ts, t_qty, bar_close_arr, bar_start_arr, lookback=50,
+        )
+    else:
+        volume_profile_entropy = np.zeros(n, dtype=np.float64)
+        large_trade_count = np.zeros(n, dtype=np.float64)
+        macro_trade_size_skew = np.zeros(n, dtype=np.float64)
+
     # Build output DataFrame
     result = pl.DataFrame({
         "timestamp_ms": bar_close_ts,
@@ -328,6 +586,11 @@ def extract_features(
         "liq_x_vpin": liq_x_vpin,
         "vpin_x_duration": vpin_x_duration,
         "liq_x_return": liq_x_return,
+        "cvd_momentum": cvd_momentum,
+        "wall_lifecycle": wall_lifecycle,
+        "volume_profile_entropy": volume_profile_entropy,
+        "large_trade_count": large_trade_count,
+        "macro_trade_size_skew": macro_trade_size_skew,
     })
 
     return result

@@ -72,10 +72,10 @@ def test_vpin_range():
 
 
 def test_feature_count():
-    """Must have exactly 10 feature columns + timestamp_ms."""
+    """Must have exactly 15 feature columns + timestamp_ms."""
     features = get_features()
     feature_cols = [c for c in features.columns if c != "timestamp_ms"]
-    assert len(feature_cols) == 10, f"Expected 10 features, got {len(feature_cols)}: {feature_cols}"
+    assert len(feature_cols) == 15, f"Expected 15 features, got {len(feature_cols)}: {feature_cols}"
     print(f"  PASS: {len(feature_cols)} feature columns present")
 
 
@@ -87,6 +87,57 @@ def test_row_count():
     print(f"  PASS: {len(features)} rows (matches volume bars)")
 
 
+def test_new_features_present():
+    """All 5 new features must be present in the output."""
+    features = get_features()
+    new_cols = [
+        "cvd_momentum",
+        "wall_lifecycle",
+        "volume_profile_entropy",
+        "large_trade_count",
+        "macro_trade_size_skew",
+    ]
+    for col in new_cols:
+        assert col in features.columns, f"Missing feature: {col}"
+    print(f"  PASS: All 5 new features present")
+
+
+def test_cvd_momentum_range():
+    """CVD momentum should be finite. First 10 bars should be 0 (no lookback)."""
+    features = get_features()
+    cvd_mom = features["cvd_momentum"].to_numpy()
+    assert np.all(np.isfinite(cvd_mom)), "cvd_momentum has non-finite values"
+    # First 10 bars have no lookback → should be 0
+    assert np.all(cvd_mom[:10] == 0.0), f"cvd_momentum[:10] should be 0, got {cvd_mom[:10]}"
+    print(f"  PASS: cvd_momentum finite, first 10 bars = 0")
+
+
+def test_volume_profile_entropy_nonneg():
+    """Entropy is always >= 0."""
+    features = get_features()
+    entropy = features["volume_profile_entropy"].to_numpy()
+    assert np.all(np.isfinite(entropy)), "volume_profile_entropy has non-finite values"
+    assert entropy.min() >= 0.0, f"entropy < 0: {entropy.min()}"
+    print(f"  PASS: volume_profile_entropy >= 0 (min={entropy.min():.4f})")
+
+
+def test_large_trade_count_nonneg():
+    """Large trade count is always >= 0."""
+    features = get_features()
+    ltc = features["large_trade_count"].to_numpy()
+    assert np.all(np.isfinite(ltc)), "large_trade_count has non-finite values"
+    assert ltc.min() >= 0.0, f"large_trade_count < 0: {ltc.min()}"
+    print(f"  PASS: large_trade_count >= 0 (max={ltc.max():.0f})")
+
+
+def test_wall_lifecycle_finite():
+    """Wall lifecycle should be finite (can be negative)."""
+    features = get_features()
+    wl = features["wall_lifecycle"].to_numpy()
+    assert np.all(np.isfinite(wl)), "wall_lifecycle has non-finite values"
+    print(f"  PASS: wall_lifecycle finite (range [{wl.min():.0f}, {wl.max():.0f}])")
+
+
 def main():
     print("=" * 60)
     print("FEATURE EXTRACTOR v2 TESTS")
@@ -96,11 +147,16 @@ def main():
     print()
 
     tests = [
-        ("Feature count = 10", test_feature_count),
+        ("Feature count = 15", test_feature_count),
         ("Row count matches bars", test_row_count),
         ("No NaN or Inf", test_no_nan_inf),
         ("All finite", test_all_finite),
         ("VPIN in [0,1]", test_vpin_range),
+        ("New features present", test_new_features_present),
+        ("CVD momentum range", test_cvd_momentum_range),
+        ("Volume profile entropy >= 0", test_volume_profile_entropy_nonneg),
+        ("Large trade count >= 0", test_large_trade_count_nonneg),
+        ("Wall lifecycle finite", test_wall_lifecycle_finite),
     ]
 
     passed = 0

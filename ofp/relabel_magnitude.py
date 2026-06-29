@@ -29,8 +29,8 @@ LABEL_STOP = 0     # -1% hit first
 LABEL_NO_TRADE = 2 # neither hit within 24h
 
 # Default parameters
-TARGET_BPS = 100      # +1% = 100 basis points
-STOP_BPS = 100        # -1% = 100 basis points
+DEFAULT_TARGET_BPS = 100
+DEFAULT_STOP_BPS = 100
 MAX_HORIZON_MS = 24 * 3600 * 1000  # 24 hours in ms
 
 RAW_DIR = Path("data/raw_futures")
@@ -46,8 +46,8 @@ def compute_magnitude_label(
     trade_px: np.ndarray,
     bar_close_ms: int,
     bar_close_px: float,
-    target_bps: int = TARGET_BPS,
-    stop_bps: int = STOP_BPS,
+    target_bps: int = DEFAULT_TARGET_BPS,
+    stop_bps: int = DEFAULT_STOP_BPS,
     max_horizon_ms: int = MAX_HORIZON_MS,
 ) -> tuple[int, float, float]:
     """
@@ -179,8 +179,8 @@ def _load_trades_for_range(start_ms: int, end_ms: int, raw_dir: Path = RAW_DIR) 
 def relabel_bars(
     bars: pl.DataFrame,
     raw_dir: Path = RAW_DIR,
-    target_bps: int = TARGET_BPS,
-    stop_bps: int = STOP_BPS,
+    target_bps: int = DEFAULT_TARGET_BPS,
+    stop_bps: int = DEFAULT_STOP_BPS,
     max_horizon_ms: int = MAX_HORIZON_MS,
 ) -> pl.DataFrame:
     """
@@ -260,6 +260,8 @@ def main() -> None:
     end_date = None
     threshold = 50.0
     horizon_s = 86400  # default 24h
+    target_bps = DEFAULT_TARGET_BPS
+    stop_bps = DEFAULT_STOP_BPS
 
     args = sys.argv[1:]
     dates = [a for a in args if not a.startswith("--")]
@@ -278,6 +280,16 @@ def main() -> None:
         if idx + 1 < len(args):
             horizon_s = int(args[idx + 1])
 
+    if "--target_bps" in args:
+        idx = args.index("--target_bps")
+        if idx + 1 < len(args):
+            target_bps = int(args[idx + 1])
+
+    if "--stop_bps" in args:
+        idx = args.index("--stop_bps")
+        if idx + 1 < len(args):
+            stop_bps = int(args[idx + 1])
+
     # Default to all dates in raw_futures if not specified
     if start_date is None:
         dates_avail = sorted(p.name for p in RAW_DIR.iterdir() if p.is_dir())
@@ -290,13 +302,16 @@ def main() -> None:
         end_date = start_date
 
     horizon_ms = horizon_s * 1000
-    output_file = Path(f"data/research_dataset_v2_mag_{horizon_s}s.parquet")
+    if target_bps == DEFAULT_TARGET_BPS and stop_bps == DEFAULT_STOP_BPS:
+        output_file = Path(f"data/research_dataset_v2_mag_{horizon_s}s.parquet")
+    else:
+        output_file = Path(f"data/research_dataset_v2_mag_{horizon_s}s_{target_bps}bps.parquet")
 
     print(f"=== MAGNITUDE RELABEL ===")
     print(f"  Date range: {start_date} → {end_date}")
     print(f"  Volume threshold: {threshold} BTC")
-    print(f"  Target: +{TARGET_BPS} bps (+1%)")
-    print(f"  Stop:   -{STOP_BPS} bps (-1%)")
+    print(f"  Target: +{target_bps} bps (+{target_bps/100:.2f}%)")
+    print(f"  Stop:   -{stop_bps} bps (-{stop_bps/100:.2f}%)")
     print(f"  Horizon: {horizon_s / 3600:.0f}h ({horizon_s}s)")
     print(f"  Output: {output_file}")
     print()
@@ -330,7 +345,7 @@ def main() -> None:
     print()
 
     # Relabel
-    bars = relabel_bars(bars, raw_dir=RAW_DIR, max_horizon_ms=horizon_ms)
+    bars = relabel_bars(bars, raw_dir=RAW_DIR, target_bps=target_bps, stop_bps=stop_bps, max_horizon_ms=horizon_ms)
 
     # Print label distribution
     print()
