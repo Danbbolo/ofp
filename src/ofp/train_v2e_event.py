@@ -129,6 +129,11 @@ def load_is_dataset(skip_extraction: bool = False) -> pl.DataFrame:
     features = pl.read_parquet(str(IS_FEATURE_CACHE))
     print(f"  Cached features: {len(features):,} rows")
 
+    # Drop any existing label column (the cache has magnitude labels from Task 4c)
+    if LABEL_COL in features.columns:
+        features = features.drop(LABEL_COL)
+        print(f"  Dropped stale '{LABEL_COL}' column from feature cache")
+
     # Build volume bars and relabel with event target
     from ofp.volume_clock import build_volume_bars
 
